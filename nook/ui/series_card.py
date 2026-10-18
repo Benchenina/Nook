@@ -30,6 +30,7 @@ class SeriesCard(QFrame):
     favorite_toggled = pyqtSignal(int, bool) # series_id, new_state
     customize_requested = pyqtSignal(int)   # series_id
     hide_requested = pyqtSignal(int)        # series_id
+    unhide_requested = pyqtSignal(int)      # series_id
     play_next_requested = pyqtSignal(int)   # series_id
     mark_all_watched = pyqtSignal(int, bool)# series_id, watched
 
@@ -101,6 +102,23 @@ class SeriesCard(QFrame):
             }
         """)
         self.count_badge.move(8, 8)
+
+        # Hidden badge if series is hidden
+        is_hidden = bool(self.series_data.get("is_hidden", 0))
+        self.hidden_badge = QLabel("👁 HIDDEN", self.poster_container)
+        self.hidden_badge.setStyleSheet("""
+            QLabel {
+                color: #E5A93C;
+                font-size: 10px;
+                font-weight: bold;
+                background-color: rgba(26, 22, 20, 0.85);
+                border: 1px solid rgba(229, 169, 60, 0.5);
+                border-radius: 6px;
+                padding: 2px 6px;
+            }
+        """)
+        self.hidden_badge.move(8, 32)
+        self.hidden_badge.setVisible(is_hidden)
 
         # Watched progress bar at the bottom of the poster
         watched_count = self.series_data.get("watched_count", 0)
@@ -189,10 +207,13 @@ class SeriesCard(QFrame):
         menu.addSeparator()
 
         custom_action = menu.addAction("⚙ Customize Series...")
-        custom_action.triggered.connect(lambda: self.customize_requested.emit(self.series_id))
-
-        hide_action = menu.addAction("👁 Hide Series")
-        hide_action.triggered.connect(lambda: self.hide_requested.emit(self.series_id))
+        is_hidden = bool(self.series_data.get("is_hidden", 0))
+        if is_hidden:
+            unhide_action = menu.addAction("👁 Unhide Series")
+            unhide_action.triggered.connect(lambda: self.unhide_requested.emit(self.series_id))
+        else:
+            hide_action = menu.addAction("👁 Hide Series")
+            hide_action.triggered.connect(lambda: self.hide_requested.emit(self.series_id))
 
         folder_action = menu.addAction("📁 Open Folder in File Manager")
         folder_action.triggered.connect(self._open_folder_in_file_manager)

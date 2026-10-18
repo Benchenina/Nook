@@ -47,6 +47,7 @@ class LibraryView(QWidget):
         self.current_tag: str = "All"
         self.current_sort: str = "title"
         self.search_query: str = ""
+        self.show_hidden: bool = False
 
         self._cards: List[SeriesCard] = []
 
@@ -86,6 +87,16 @@ class LibraryView(QWidget):
 
         self.tags_scroll.setWidget(self.tags_container)
         toolbar.addWidget(self.tags_scroll, stretch=1)
+
+        # Show Hidden Toggle Button
+        self.show_hidden_btn = QPushButton("👁 Hidden", self)
+        self.show_hidden_btn.setObjectName("secondaryBtn")
+        self.show_hidden_btn.setCheckable(True)
+        self.show_hidden_btn.setChecked(False)
+        self.show_hidden_btn.setToolTip("Toggle displaying hidden items in library")
+        self.show_hidden_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.show_hidden_btn.clicked.connect(self._toggle_show_hidden)
+        toolbar.addWidget(self.show_hidden_btn)
 
         # Sort dropdown
         sort_lbl = QLabel("Sort by:", self)
@@ -149,6 +160,13 @@ class LibraryView(QWidget):
         main_layout.addWidget(self.empty_widget)
         self.empty_widget.setVisible(False)
 
+    def _toggle_show_hidden(self) -> None:
+        self.show_hidden = self.show_hidden_btn.isChecked()
+        self.show_hidden_btn.setProperty("active", "true" if self.show_hidden else "false")
+        self.show_hidden_btn.style().unpolish(self.show_hidden_btn)
+        self.show_hidden_btn.style().polish(self.show_hidden_btn)
+        self.refresh()
+
     def refresh(self) -> None:
         """Reload all series and refresh the grid view."""
         # 1. Update Recently Watched Carousel if enabled
@@ -160,17 +178,33 @@ class LibraryView(QWidget):
             else:
                 self.carousel.setVisible(False)
 
-        # 2. Update Tag Pills
-        self._refresh_tags()
+        # 2. Update Tag Pills & Hidden Button status
+        all_hidden = [s for s in self.db.get_all_series(include_hidden=True) if s.get("is_hidden")]
+        hidden_count = len(all_hidden)
+        if hidden_count > 0:
+            self.show_hidden_btn.setVisible(True)
+            self.show_hidden_btn.setText(f"👁 Hidden ({hidden_count})")
+        else:
+            self.show_hidden_btn.setVisible(self.show_hidden)
+            self.show_hidden_btn.setText("👁 Hidden")
+
+        self._refresh_tags(hidden_count)
 
         # 3. Load Series from Database
+        include_hidden = self.show_hidden or (self.current_tag.lower() == "hidden")
+        tag_filter = None if self.current_tag.lower() in ("all", "hidden") else self.current_tag
         series_list = self.db.get_all_series(
-            include_hidden=False,
+            include_hidden=include_hidden,
             only_favorites=self.only_favorites,
-            tag=self.current_tag,
+            tag=tag_filter,
             search_query=self.search_query,
             sort_by=self.current_sort
         )
+
+        if self.current_tag.lower() == "hidden":
+            series_list = [s for s in series_list if s.get("is_hidden")]
+        elif not self.show_hidden:
+            series_list = [s for s in series_list if not s.get("is_hidden")]
 
         # 4. Render Grid Cards
         self._render_grid(series_list)
@@ -180,7 +214,7 @@ class LibraryView(QWidget):
         self.search_query = query.strip()
         self.refresh()
 
-    def _refresh_tags(self) -> None:
+    def _refresh_tags(self, hidden_count: int = 0) -> None:
         """Rebuild tag filter chips."""
         while self.tags_layout.count() > 1:
             item = self.tags_layout.takeAt(0)
@@ -188,8 +222,12 @@ class LibraryView(QWidget):
                 item.widget().deleteLater()
 
         all_tags = ["All"] + self.db.get_all_tags()
+        if hidden_count > 0 and "Hidden" not in all_tags:
+            all_tags.append("Hidden")
+
         for t in all_tags:
-            btn = QPushButton(t, self.tags_container)
+            label = f"👁 Hidden ({hidden_count})" if t == "Hidden" else t
+            btn = QPushButton(label, self.tags_container)
             btn.setObjectName("tagPill")
             btn.setProperty("active", "true" if t.lower() == self.current_tag.lower() else "false")
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -205,11 +243,15 @@ class LibraryView(QWidget):
         self.refresh()
 
     def _render_grid(self, series_list: List[Dict[str, Any]]) -> None:
-        # Clear existing cards
+        # Clear existing cards safely
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item:
+                w = item.widget()
+                if w:
+                    w.hide()
+                    w.setParent(None)
+                    w.deleteLater()
         self._cards.clear()
 
         if not series_list:
@@ -223,6 +265,10 @@ class LibraryView(QWidget):
             elif self.only_favorites:
                 self.empty_title.setText("No Favorites Yet")
                 self.empty_subtitle.setText("Right-click any series card or click the heart button to add it to favorites.")
+                self.empty_action_btn.setVisible(False)
+            elif self.current_tag.lower() == "hidden":
+                self.empty_title.setText("No Hidden Items")
+                self.empty_subtitle.setText("No series are currently marked as hidden.")
                 self.empty_action_btn.setVisible(False)
             else:
                 self.empty_title.setText("Your Library is Empty")
@@ -239,11 +285,20 @@ class LibraryView(QWidget):
             card.favorite_toggled.connect(self._toggle_card_favorite)
             card.customize_requested.connect(self._customize_series)
             card.hide_requested.connect(self._hide_series)
+            card.unhide_requested.connect(self._unhide_series)
             card.play_next_requested.connect(self._play_next_series_episode)
             card.mark_all_watched.connect(self._mark_series_watched)
 
             self.grid_layout.addWidget(card)
+            card.show()
             self._cards.append(card)
+
+        self.grid_container.adjustSize()
+
+    def _unhide_series(self, series_id: int) -> None:
+        self.db.set_series_hidden(series_id, False)
+        self.refresh()
+        ToastNotification.show_toast(self.window(), "Series unhidden and restored to library grid.")
 
     def _toggle_card_favorite(self, series_id: int, new_fav_state: bool) -> None:
         self.db.set_series_favorite(series_id, new_fav_state)

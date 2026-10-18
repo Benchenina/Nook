@@ -44,16 +44,22 @@ class ScanWorker(QThread):
     progress = pyqtSignal(int, int, str)
     series_found = pyqtSignal(str)
     finished = pyqtSignal(int, int)
+    error = pyqtSignal(str)
 
-    def __init__(self, scanner: LibraryScanner):
+    def __init__(self, db: Database):
         super().__init__()
-        self.scanner = scanner
+        self.db = db
 
     def run(self) -> None:
-        self.scanner.scan_progress.connect(self.progress.emit)
-        self.scanner.scan_series_found.connect(self.series_found.emit)
-        s_count, e_count = self.scanner.scan_all()
-        self.finished.emit(s_count, e_count)
+        try:
+            scanner = LibraryScanner(self.db)
+            s_count, e_count = scanner.scan_all(
+                on_progress=lambda curr, total, msg: self.progress.emit(curr, total, msg),
+                on_series_found=lambda name: self.series_found.emit(name)
+            )
+            self.finished.emit(s_count, e_count)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class SettingsView(QWidget):
@@ -61,11 +67,11 @@ class SettingsView(QWidget):
 
     theme_changed = pyqtSignal(str)       # "dark" or "light"
     library_rescanned = pyqtSignal(int, int)
+    hidden_changed = pyqtSignal()
 
     def __init__(self, db: Database, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.db = db
-        self.scanner = LibraryScanner(self.db)
         self.scan_worker: Optional[ScanWorker] = None
 
         self._init_ui()
@@ -368,7 +374,8 @@ class SettingsView(QWidget):
     def _unhide_series(self, series_id: int) -> None:
         self.db.set_series_hidden(series_id, False)
         self._refresh_hidden_table()
-        ToastNotification.show_toast(self.window(), "Series restored to library grid.")
+        self.hidden_changed.emit()
+        ToastNotification.show_toast(self.window(), "Series unhidden and restored to library grid.")
 
     def _add_root_directory(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select Video Library Folder")
@@ -386,6 +393,7 @@ class SettingsView(QWidget):
         root_id = curr.data(Qt.ItemDataRole.UserRole)
         self.db.remove_root_directory(root_id)
         self.refresh()
+        self.library_rescanned.emit(0, 0)
         ToastNotification.show_toast(self.window(), "Root folder removed from library.")
 
     def start_scan(self) -> None:
@@ -398,11 +406,18 @@ class SettingsView(QWidget):
         self.scan_progress_bar.setValue(0)
         self.scan_status_lbl.setText("Starting library scan...")
 
-        self.scan_worker = ScanWorker(self.scanner)
+        self.scan_worker = ScanWorker(self.db)
         self.scan_worker.progress.connect(self._on_scan_progress)
         self.scan_worker.series_found.connect(lambda title: self.scan_status_lbl.setText(f"Found: {title}"))
         self.scan_worker.finished.connect(self._on_scan_finished)
+        self.scan_worker.error.connect(self._on_scan_error)
         self.scan_worker.start()
+
+    def _on_scan_error(self, err_msg: str) -> None:
+        self.scan_now_btn.setEnabled(True)
+        self.scan_progress_bar.setVisible(False)
+        self.scan_status_lbl.setText(f"Scan error: {err_msg}")
+        ToastNotification.show_toast(self.window(), f"Scan error: {err_msg}", duration_ms=4000)
 
     def _on_scan_progress(self, curr: int, total: int, status: str) -> None:
         self.scan_progress_bar.setValue(curr)

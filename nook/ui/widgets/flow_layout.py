@@ -78,7 +78,7 @@ class FlowLayout(QLayout):
 
         for item in self._item_list:
             widget = item.widget()
-            if widget and not widget.isVisible():
+            if widget and widget.isHidden():
                 continue
 
             item_size = item.sizeHint()

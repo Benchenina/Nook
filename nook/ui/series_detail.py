@@ -398,6 +398,13 @@ class SeriesDetailView(QWidget):
         self.open_folder_btn.clicked.connect(self._open_series_folder)
         action_row.addWidget(self.open_folder_btn)
 
+        self.unhide_btn = QPushButton("👁 Unhide Series", self.hero_card)
+        self.unhide_btn.setObjectName("secondaryBtn")
+        self.unhide_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.unhide_btn.clicked.connect(self._unhide_series)
+        self.unhide_btn.setVisible(False)
+        action_row.addWidget(self.unhide_btn)
+
         action_row.addStretch()
         info_layout.addLayout(action_row)
 
@@ -468,6 +475,9 @@ class SeriesDetailView(QWidget):
         is_fav = bool(self.series_data.get("is_favorite", 0))
         self.fav_btn.setText("♥ Favorited" if is_fav else "♡ Favorite")
         self.fav_btn.setStyleSheet("color: #E25555; font-weight: bold;" if is_fav else "")
+
+        is_hidden = bool(self.series_data.get("is_hidden", 0))
+        self.unhide_btn.setVisible(is_hidden)
 
         desc = self.series_data.get("description", "")
         self.desc_lbl.setText(desc if desc else "No synopsis available. Click 'Online Info' to fetch metadata automatically.")
@@ -600,6 +610,12 @@ class SeriesDetailView(QWidget):
         self.db.set_series_favorite(self.series_id, is_fav)
         self.load_series(self.series_id)
         self.series_updated.emit(self.series_id)
+
+    def _unhide_series(self) -> None:
+        self.db.set_series_hidden(self.series_id, False)
+        self.load_series(self.series_id)
+        self.series_updated.emit(self.series_id)
+        ToastNotification.show_toast(self.window(), "Series unhidden and restored to library grid.")
 
     def _mark_all_watched(self, watched: bool) -> None:
         self.db.mark_all_episodes_watched(self.series_id, watched=watched)

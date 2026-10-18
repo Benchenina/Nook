@@ -258,13 +258,19 @@ class LibraryScanner(QObject):
     def cancel(self) -> None:
         self._is_cancelled = True
 
-    def scan_all(self) -> Tuple[int, int]:
+    def scan_all(
+        self,
+        on_progress: Optional[Callable[[int, int, str], None]] = None,
+        on_series_found: Optional[Callable[[str], None]] = None
+    ) -> Tuple[int, int]:
         """Scan all registered root directories."""
         self._is_cancelled = False
         self.scan_started.emit()
 
         root_dirs = self.db.get_root_directories()
         if not root_dirs:
+            if on_progress:
+                on_progress(100, 100, "No root folders configured.")
             self.scan_finished.emit(0, 0)
             return 0, 0
 
@@ -281,17 +287,26 @@ class LibraryScanner(QObject):
             if not root_path.exists() or not root_path.is_dir():
                 continue
 
-            s_count, e_count = self.scan_root(root_id, root_path)
+            s_count, e_count = self.scan_root(root_id, root_path, on_progress, on_series_found)
             series_count += s_count
             episodes_count += e_count
 
             progress = int(((r_idx + 1) / total_roots) * 100)
-            self.scan_progress.emit(progress, 100, f"Scanned {root_path.name}")
+            status_msg = f"Scanned {root_path.name}"
+            if on_progress:
+                on_progress(progress, 100, status_msg)
+            self.scan_progress.emit(progress, 100, status_msg)
 
         self.scan_finished.emit(series_count, episodes_count)
         return series_count, episodes_count
 
-    def scan_root(self, root_id: int, root_path: Path) -> Tuple[int, int]:
+    def scan_root(
+        self,
+        root_id: int,
+        root_path: Path,
+        on_progress: Optional[Callable[[int, int, str], None]] = None,
+        on_series_found: Optional[Callable[[str], None]] = None
+    ) -> Tuple[int, int]:
         """Scan a single root directory."""
         if not root_path.exists() or not root_path.is_dir():
             return 0, 0
@@ -302,17 +317,24 @@ class LibraryScanner(QObject):
 
         try:
             subdirs = [p for p in root_path.iterdir() if p.is_dir() and not p.name.startswith(".")]
-        except PermissionError:
-            return 0, 0
+        except (PermissionError, OSError):
+            subdirs = []
 
         # Also check if root itself contains loose video files directly
-        loose_videos = [
-            f for f in root_path.iterdir()
-            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
-        ]
+        try:
+            loose_videos = [
+                f for f in root_path.iterdir()
+                if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+            ]
+        except (PermissionError, OSError):
+            loose_videos = []
+
         if loose_videos:
             # Treat the root directory itself as a series for standalone videos
-            s_count, e_count = self._index_series_folder(root_id, root_path, loose_videos, is_root_standalone=True)
+            s_count, e_count = self._index_series_folder(
+                root_id, root_path, loose_videos, is_root_standalone=True,
+                on_series_found=on_series_found
+            )
             series_count += s_count
             episodes_count += e_count
             active_series_folders.append(str(root_path.resolve()))
@@ -322,7 +344,9 @@ class LibraryScanner(QObject):
                 break
 
             active_series_folders.append(str(subdir.resolve()))
-            s_count, e_count = self._index_series_folder(root_id, subdir)
+            s_count, e_count = self._index_series_folder(
+                root_id, subdir, on_series_found=on_series_found
+            )
             series_count += s_count
             episodes_count += e_count
 
@@ -335,7 +359,8 @@ class LibraryScanner(QObject):
         root_id: int,
         folder_path: Path,
         known_videos: Optional[List[Path]] = None,
-        is_root_standalone: bool = False
+        is_root_standalone: bool = False,
+        on_series_found: Optional[Callable[[str], None]] = None
     ) -> Tuple[int, int]:
         """Index a single series folder and its episodes."""
         folder_name = folder_path.name
@@ -378,7 +403,8 @@ class LibraryScanner(QObject):
             description=description,
             tags=tags if tags else None
         )
-
+        if on_series_found:
+            on_series_found(display_title)
         self.scan_series_found.emit(display_title)
 
         # Index episodes

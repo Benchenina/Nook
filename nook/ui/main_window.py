@@ -168,6 +168,7 @@ class MainWindow(QMainWindow):
         self.settings_view = SettingsView(self.db, parent=self.stack)
         self.settings_view.theme_changed.connect(self.apply_theme)
         self.settings_view.library_rescanned.connect(self._on_library_rescanned)
+        self.settings_view.hidden_changed.connect(lambda: (self.library_view.refresh(), self.favorites_view.refresh()))
         self.stack.addWidget(self.settings_view)
 
         # View 3: Series Detail View

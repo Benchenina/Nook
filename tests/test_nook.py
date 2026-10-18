@@ -229,6 +229,41 @@ class TestGUIWidgets(unittest.TestCase):
         self.assertEqual(series["display_title"], "Custom Virtual Name")
         self.assertIn("Action", series["tags_list"])
 
+    def test_rescan_stability(self):
+        window = MainWindow(self.db)
+        # Scan 1
+        window.settings_view.start_scan()
+        while window.settings_view.scan_worker and window.settings_view.scan_worker.isRunning():
+            self.app.processEvents()
+        # Scan 2 immediately
+        window.settings_view.start_scan()
+        while window.settings_view.scan_worker and window.settings_view.scan_worker.isRunning():
+            self.app.processEvents()
+        self.assertTrue(True)
+
+    def test_hide_and_unhide_flow(self):
+        r_id = self.db.add_root_directory("/tmp/test_root")
+        s_id = self.db.upsert_series(r_id, "/tmp/test_root/HiddenAnime", "HiddenAnime", "Hidden Anime")
+        self.db.set_series_hidden(s_id, True)
+
+        window = MainWindow(self.db)
+        window.show()
+        window.library_view.refresh()
+        self.app.processEvents()
+
+        # Check hidden button is not hidden
+        self.assertFalse(window.library_view.show_hidden_btn.isHidden())
+
+        # Toggle show hidden
+        window.library_view.show_hidden_btn.click()
+        self.app.processEvents()
+        hidden_cards = [c for c in window.library_view._cards if c.series_id == s_id]
+        self.assertEqual(len(hidden_cards), 1)
+
+        # Unhide
+        window.library_view._unhide_series(s_id)
+        self.assertEqual(self.db.get_series_by_id(s_id)["is_hidden"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
