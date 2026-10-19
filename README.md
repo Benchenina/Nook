@@ -1,4 +1,4 @@
-# ☕ Nook — Cross-Platform Cozy Local Video Library Manager
+# Nook — Cross-Platform Local Video Library Manager
 
 **Nook** is a high-performance desktop application (**Linux and Windows**) designed to be your personal video library manager. Inspired by the visual clarity of Steam and modern streaming platforms, Nook is infused with a warm, welcoming aesthetic (soft rounded cards, warm amber and terracotta accents, clean typography, and seamless light/dark mode switching).
 
@@ -151,7 +151,7 @@ python3 main.py
 
 ---
 
-## 💾 Application Data Paths
+## Application Data Paths
 
 * **Linux:** `~/.config/Nook/` (`nook.db` and managed `covers/`)
 * **Windows:** `%APPDATA%\Nook\` (`nook.db` and managed `covers/`)
