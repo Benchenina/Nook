@@ -92,6 +92,85 @@ class FilenameCleaner:
 
         return 0, 0, stem
 
+    @staticmethod
+    def extract_season_from_path(folder_path: Path, vfile: Path, file_season_num: int = 0) -> Tuple[int, str]:
+        """Detect season number and clean season name based on subfolder structure."""
+        try:
+            rel = vfile.parent.relative_to(folder_path)
+            parts = rel.parts
+        except ValueError:
+            parts = ()
+
+        if parts:
+            # Immediate subfolder inside the series directory
+            subfolder_name = parts[0].strip()
+
+            # A subfolder that clearly identifies a season wins over filename metadata
+            parsed = FilenameCleaner.parse_season_folder(subfolder_name)
+            if parsed is not None:
+                return parsed
+
+            # Any arbitrary subfolder (e.g. "Kyoto Arc", "Prelude") becomes its own group
+            s_num = file_season_num if file_season_num > 0 else 0
+            return s_num, subfolder_name
+
+        # File is directly in root series folder
+        if file_season_num > 0:
+            return file_season_num, f"Season {file_season_num}"
+
+        return 1, "Season 1"
+
+    @staticmethod
+    def parse_season_folder(folder_name: str) -> Optional[Tuple[int, str]]:
+        """Interpret a subfolder name as a season group.
+
+        Returns ``(season_number, season_name)`` when the folder name looks like a
+        season (or a special/extra category), otherwise ``None``.
+
+        Recognised examples:
+        - "Season 1", "Season 02", "S1", "S02", "1", "01"
+        - "Season 2 - Kyoto Arc", "S03 - Final"
+        - "Specials", "SP", "OVAs", "Movies", "Extras", "Bonus"
+        - "Arc 2", "Part 1", "Book 3", "Volume 4"
+        """
+        name = (folder_name or "").strip()
+        if not name:
+            return None
+
+        # Plain "Season N" / "SN"
+        s_match = re.match(r"^(?:season|s)[\s._\-]*(\d{1,2})$", name, re.IGNORECASE)
+        if s_match:
+            s_num = int(s_match.group(1))
+            return s_num, f"Season {s_num}"
+
+        # Bare numeric folders, e.g. "1", "01", "2"
+        n_match = re.match(r"^(\d{1,2})$", name)
+        if n_match:
+            s_num = int(n_match.group(1))
+            return s_num, f"Season {s_num}"
+
+        # Embedded season in folder name like "Season 2 - Kyoto Arc" or "S03 - Final"
+        s_embed = re.search(r"\b(?:season|s)[\s._\-]*(\d{1,2})\b", name, re.IGNORECASE)
+        if s_embed:
+            return int(s_embed.group(1)), name
+
+        # Special categories
+        if re.search(r"\b(?:specials?|sp)\b", name, re.IGNORECASE):
+            return 0, "Specials"
+        if re.search(r"\b(?:ovas?|oads?)\b", name, re.IGNORECASE):
+            return 0, "OVAs"
+        if re.search(r"\b(?:movies?|films?)\b", name, re.IGNORECASE):
+            return 0, "Movies"
+        if re.search(r"\b(?:extras?|bonus|behind[\s._\-]*the[\s._\-]*scenes)\b", name, re.IGNORECASE):
+            return 0, "Extras"
+
+        # Other numbered arcs e.g. "Arc 2", "Part 1", "Book 3"
+        arc_num = re.search(r"\b(?:arc|part|book|vol|volume)[\s._\-]*(\d{1,2})\b", name, re.IGNORECASE)
+        if arc_num:
+            return int(arc_num.group(1)), name
+
+        return None
+
     @classmethod
     def clean_title(cls, filename_or_folder: str, is_episode: bool = True) -> str:
         """Convert a messy filename or folder name into a clean, human-readable title."""
@@ -254,6 +333,9 @@ class LibraryScanner(QObject):
         super().__init__()
         self.db = db or Database()
         self._is_cancelled = False
+        # Series folders discovered for the first time during the last scan.
+        # Consumed by the scan worker to auto-fetch online metadata.
+        self.new_series: List[Dict[str, Any]] = []
 
     def cancel(self) -> None:
         self._is_cancelled = True
@@ -265,6 +347,7 @@ class LibraryScanner(QObject):
     ) -> Tuple[int, int]:
         """Scan all registered root directories."""
         self._is_cancelled = False
+        self.new_series = []
         self.scan_started.emit()
 
         root_dirs = self.db.get_root_directories()
@@ -393,6 +476,17 @@ class LibraryScanner(QObject):
             # If folder has neither video files nor covers, skip it
             return 0, 0
 
+        # A series "has seasons" when at least one video lives inside a
+        # sub-folder of the series folder (e.g. "Season 1", "S02", "Arc 2").
+        folder_resolved = folder_path.resolve()
+        has_seasons = any(
+            vfile.parent.resolve() != folder_resolved for vfile in video_files
+        )
+
+        # Detect whether this is a folder we have never indexed before so the
+        # caller can fetch online metadata only for genuinely new additions.
+        is_new = not self.db.series_exists(folder_path)
+
         # Upsert series in database
         series_id = self.db.upsert_series(
             root_id=root_id,
@@ -401,8 +495,22 @@ class LibraryScanner(QObject):
             display_title=display_title,
             detected_cover_path=detected_cover_str,
             description=description,
-            tags=tags if tags else None
+            tags=tags if tags else None,
+            has_seasons=has_seasons,
         )
+        if is_new:
+            has_nfo_title = bool(nfo_data.get("title"))
+            # Local .nfo metadata is treated as authoritative; a folder with
+            # one is considered already curated and left untouched.
+            if not has_nfo_title:
+                self.new_series.append({
+                    "series_id": series_id,
+                    "folder_name": folder_name,
+                    "display_title": display_title,
+                    "description": description,
+                    "tags": tags or [],
+                    "has_local_cover": bool(detected_cover_str),
+                })
         if on_series_found:
             on_series_found(display_title)
         self.scan_series_found.emit(display_title)
@@ -414,11 +522,10 @@ class LibraryScanner(QObject):
             clean_ep_title = FilenameCleaner.clean_title(file_name, is_episode=True)
             season_num, ep_num, _ = FilenameCleaner.extract_season_episode(file_name)
 
-            # If season number wasn't found in file name, check parent folder (e.g. "Season 2")
-            if season_num == 0 and vfile.parent != folder_path:
-                parent_s = re.search(r"[Ss]eason\s*(\d{1,2})", vfile.parent.name)
-                if parent_s:
-                    season_num = int(parent_s.group(1))
+            # Recognize season and subfolder name
+            season_num, season_name = FilenameCleaner.extract_season_from_path(folder_path, vfile, season_num)
+            if not season_name:
+                season_name = f"Season {season_num}" if season_num > 0 else "Season 1"
 
             try:
                 file_size = vfile.stat().st_size
@@ -432,7 +539,8 @@ class LibraryScanner(QObject):
                 clean_title=clean_ep_title,
                 season_number=season_num,
                 episode_number=ep_num,
-                file_size=file_size
+                file_size=file_size,
+                season_name=season_name
             )
             active_episode_files.append(str(vfile.resolve()))
 

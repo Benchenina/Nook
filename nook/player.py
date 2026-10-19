@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from nook.database import Database
+from nook.streaming import is_stream_url
 
 
 class MediaPlayer:
@@ -36,18 +37,36 @@ class MediaPlayer:
         resume: bool = True,
         override_player_path: Optional[str] = None
     ) -> Tuple[bool, str]:
-        """Launch the media player for the given episode ID."""
+        """Launch the media player for the given episode ID.
+
+        Episodes may point either at a local file or at a network stream
+        (``http(s)://…`` / ``.m3u8``); both are handled transparently.
+        """
         ep = self.db.get_episode_by_id(episode_id)
         if not ep:
             return False, f"Episode ID {episode_id} not found."
 
-        file_path = Path(ep["file_path"])
-        if not file_path.exists():
-            return False, f"Media file not found: {file_path}"
+        media_reference = (ep.get("file_path") or "").strip()
+        if not media_reference:
+            return False, "Episode has no media source."
 
         start_time = ep["playback_position"] if (resume and ep.get("playback_position", 0) > 0) else 0
 
-        success, err = self.play_file(file_path, start_seconds=start_time, override_player_path=override_player_path)
+        if is_stream_url(media_reference):
+            # Network streams are handed straight to the player / browser.
+            success, err = self.play_url(
+                media_reference,
+                start_seconds=start_time,
+                override_player_path=override_player_path,
+            )
+        else:
+            file_path = Path(media_reference)
+            if not file_path.exists():
+                return False, f"Media file not found: {file_path}"
+            success, err = self.play_file(
+                file_path, start_seconds=start_time, override_player_path=override_player_path
+            )
+
         if success:
             # Update watch stats
             self.db.update_episode_progress(
@@ -63,32 +82,61 @@ class MediaPlayer:
         start_seconds: int = 0,
         override_player_path: Optional[str] = None
     ) -> Tuple[bool, str]:
-        """Launch the specified file using the configured or custom player."""
+        """Launch the specified local file using the configured or custom player."""
+        return self._launch(
+            str(file_path),
+            is_url=False,
+            start_seconds=start_seconds,
+            override_player_path=override_player_path,
+        )
+
+    def play_url(
+        self,
+        url: str,
+        start_seconds: int = 0,
+        override_player_path: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """Launch a network stream URL (HLS/``.m3u8``/direct link)."""
+        return self._launch(
+            url,
+            is_url=True,
+            start_seconds=start_seconds,
+            override_player_path=override_player_path,
+        )
+
+    def _launch(
+        self,
+        target: str,
+        is_url: bool,
+        start_seconds: int = 0,
+        override_player_path: Optional[str] = None,
+    ) -> Tuple[bool, str]:
+        """Dispatch a local file or network URL to the configured player."""
         system = platform.system()
         mode = self.db.get_setting("media_player_mode", "system")
         custom_path = override_player_path or self.db.get_setting("media_player_path", "").strip()
 
         # Check if we should use custom player
         if (mode == "custom" or override_player_path) and custom_path:
-            return self._launch_custom_player(custom_path, file_path, start_seconds)
+            return self._launch_custom_player(custom_path, target, start_seconds, is_url=is_url)
 
-        # Fallback to system default player
-        return self._launch_system_player(file_path, system)
+        # Fallback to system default player / handler
+        return self._launch_system_player(target, system, is_url=is_url)
 
-    def _launch_system_player(self, file_path: Path, system: str) -> Tuple[bool, str]:
-        """Launch the file with OS default handler."""
-        abs_path = str(file_path.resolve())
+    def _launch_system_player(self, target: str, system: str, is_url: bool = False) -> Tuple[bool, str]:
+        """Launch a file or URL with the OS default handler."""
+        abs_path = target if is_url else str(Path(target).resolve())
         try:
             if system == "Windows":
-                # os.startfile is non-blocking on Windows
+                # os.startfile is non-blocking on Windows and opens URLs too
                 os.startfile(abs_path)
                 return True, ""
             elif system == "Darwin":
-                # macOS open
+                # macOS open (handles both files and URLs)
                 subprocess.Popen(["open", abs_path])
                 return True, ""
             else:
-                # Linux xdg-open
+                # Linux xdg-open (handles both files and URLs)
                 subprocess.Popen(["xdg-open", abs_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return True, ""
         except FileNotFoundError:
@@ -99,16 +147,21 @@ class MediaPlayer:
     def _launch_custom_player(
         self,
         player_path: str,
-        file_path: Path,
-        start_seconds: int = 0
+        target: str,
+        start_seconds: int = 0,
+        is_url: bool = False,
     ) -> Tuple[bool, str]:
-        """Launch with a custom executable (VLC, MPV, etc.)."""
+        """Launch with a custom executable (VLC, MPV, etc.).
+
+        VLC and MPV both accept network URLs (including HLS ``.m3u8``) in place
+        of a local file path, so the same command construction is reused.
+        """
         # Resolve command if given as command name or absolute path
         cmd_exec = shutil.which(player_path) or player_path
         if not Path(cmd_exec).exists() and not shutil.which(player_path):
             return False, f"Configured media player executable was not found: {player_path}"
 
-        abs_file = str(file_path.resolve())
+        abs_target = target if is_url else str(Path(target).resolve())
         args = [cmd_exec]
 
         base_name = Path(cmd_exec).stem.lower()
@@ -125,7 +178,7 @@ class MediaPlayer:
                 args.append(f"-pos")
                 args.append(str(start_seconds))
 
-        args.append(abs_file)
+        args.append(abs_target)
 
         try:
             subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

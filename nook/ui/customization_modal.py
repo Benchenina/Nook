@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import (
 )
 
 from nook.database import Database
+from nook.styles import color
+from nook.ui.icons import icon, pixmap
 from nook.ui.widgets.poster_widget import PosterWidget
 
 
@@ -51,15 +53,23 @@ class CustomizationModal(QDialog):
         main_layout.setSpacing(16)
 
         # Header Title
-        header = QLabel("✨ Series Customization", self)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+        header_icon = QLabel(self)
+        header_icon.setPixmap(pixmap("sparkles", size=20))
+        header_row.addWidget(header_icon)
+
+        header = QLabel("Series Customization", self)
         font = QFont(self.font())
         font.setPointSize(16)
         font.setBold(True)
         header.setFont(font)
-        main_layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addStretch()
+        main_layout.addLayout(header_row)
 
         sub = QLabel("Customize metadata, virtual title, and poster artwork safely without touching files on disk.", self)
-        sub.setStyleSheet("color: #847569; font-size: 12px;")
+        sub.setStyleSheet(f"color: {color('text_muted')}; font-size: 12px;")
         sub.setWordWrap(True)
         main_layout.addWidget(sub)
 
@@ -85,13 +95,17 @@ class CustomizationModal(QDialog):
         cover_label.setStyleSheet("font-weight: 600;")
         cover_btns_layout.addWidget(cover_label)
 
-        self.btn_select_cover = QPushButton("🖼 Choose Custom Image...", self)
+        self.btn_select_cover = QPushButton("Choose Custom Image...", self)
+        self.btn_select_cover.setIcon(icon("image", size=15))
+        self.btn_select_cover.setIconSize(QSize(15, 15))
         self.btn_select_cover.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_select_cover.clicked.connect(self._choose_cover_file)
         cover_btns_layout.addWidget(self.btn_select_cover)
 
-        self.btn_reset_cover = QPushButton("↺ Reset to Original Cover", self)
+        self.btn_reset_cover = QPushButton("Reset to Original Cover", self)
         self.btn_reset_cover.setObjectName("secondaryBtn")
+        self.btn_reset_cover.setIcon(icon("refresh", size=15))
+        self.btn_reset_cover.setIconSize(QSize(15, 15))
         self.btn_reset_cover.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_reset_cover.clicked.connect(self._reset_cover)
         cover_btns_layout.addWidget(self.btn_reset_cover)
@@ -133,11 +147,15 @@ class CustomizationModal(QDialog):
         chk_layout = QHBoxLayout()
         chk_layout.setSpacing(20)
 
-        self.fav_chk = QCheckBox("♥ Mark as Favorite", self)
+        self.fav_chk = QCheckBox("Mark as Favorite", self)
+        self.fav_chk.setIcon(icon("heart", size=14, color="#FF5B6E"))
+        self.fav_chk.setIconSize(QSize(14, 14))
         self.fav_chk.setChecked(bool(self.series_data.get("is_favorite", 0)))
         chk_layout.addWidget(self.fav_chk)
 
-        self.hide_chk = QCheckBox("👁 Hide from Main Library", self)
+        self.hide_chk = QCheckBox("Hide from Library", self)
+        self.hide_chk.setIcon(icon("eye-off", size=14))
+        self.hide_chk.setIconSize(QSize(14, 14))
         self.hide_chk.setChecked(bool(self.series_data.get("is_hidden", 0)))
         chk_layout.addWidget(self.hide_chk)
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import uuid
@@ -53,6 +54,25 @@ def get_covers_dir() -> Path:
 def get_db_path() -> Path:
     """Return SQLite database path."""
     return get_app_dir() / "nook.db"
+
+
+# Remote / synthetic references (http(s) streams and the `scheme://` URIs used
+# for online series, e.g. ``hianime://naruto-1``) must never be run through
+# ``Path.resolve()`` - doing so would mangle the URI into a local path.
+_REMOTE_REF_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+
+def is_remote_reference(value: str) -> bool:
+    """Return True for URLs / synthetic stream references."""
+    return bool(_REMOTE_REF_RE.match((value or "").strip()))
+
+
+def _normalize_media_path(value: str) -> str:
+    """Absolutise local paths while leaving URLs untouched."""
+    value = (value or "").strip()
+    if is_remote_reference(value):
+        return value
+    return str(Path(value).resolve())
 
 
 from contextlib import contextmanager
@@ -100,7 +120,25 @@ class Database:
                 );
             """)
 
+            # Streaming sites configured by the user (name + base URL)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS streaming_sites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    base_url TEXT UNIQUE NOT NULL,
+                    source_type TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER DEFAULT 1,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
             # Series table
+            #
+            # ``source_type``/``source_id`` form a composite identifier so the
+            # very same show title can exist once per source (a local folder and
+            # a HiAnime stream of "Naruto" are two independent rows). Local
+            # series keep ``source_type='local'`` and an empty ``source_id``;
+            # the ``folder_path`` unique constraint still guards local folders.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS series (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +151,10 @@ class Database:
                     detected_cover_path TEXT DEFAULT '',
                     is_favorite INTEGER DEFAULT 0,
                     is_hidden INTEGER DEFAULT 0,
+                    has_seasons INTEGER DEFAULT 0,
+                    source_type TEXT NOT NULL DEFAULT 'local',
+                    source_id TEXT NOT NULL DEFAULT '',
+                    source_url TEXT DEFAULT '',
                     tags TEXT DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_scanned TIMESTAMP,
@@ -138,15 +180,42 @@ class Database:
                     playback_position INTEGER DEFAULT 0,
                     last_watched_at TIMESTAMP,
                     play_count INTEGER DEFAULT 0,
+                    season_name TEXT DEFAULT '',
                     FOREIGN KEY (series_id) REFERENCES series (id) ON DELETE CASCADE
                 );
             """)
 
+            # Migration: ensure season_name exists on existing databases
+            ep_columns = [col["name"] for col in cursor.execute("PRAGMA table_info(episodes);").fetchall()]
+            if "season_name" not in ep_columns:
+                cursor.execute("ALTER TABLE episodes ADD COLUMN season_name TEXT DEFAULT '';")
+
+            # Migration: ensure series columns exist on existing databases
+            series_columns = [col["name"] for col in cursor.execute("PRAGMA table_info(series);").fetchall()]
+            series_migrations = {
+                "has_seasons": "INTEGER DEFAULT 0",
+                "source_type": "TEXT NOT NULL DEFAULT 'local'",
+                "source_id": "TEXT NOT NULL DEFAULT ''",
+                "source_url": "TEXT DEFAULT ''",
+            }
+            for column, ddl in series_migrations.items():
+                if column not in series_columns:
+                    cursor.execute(f"ALTER TABLE series ADD COLUMN {column} {ddl};")
+
             # Create helpful indexes
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_series_hidden ON series (is_hidden);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_series_fav ON series (is_favorite);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_series_source_type ON series (source_type);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_series ON episodes (series_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_last_watched ON episodes (last_watched_at);")
+
+            # Composite identifier for imported streaming shows: the same
+            # (source_type, source_id) pair must never be imported twice, while
+            # local series (empty source_id) stay governed by folder_path.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_series_source
+                ON series (source_type, source_id) WHERE source_id != '';
+            """)
 
             # Seed default settings if empty
             defaults = {
@@ -156,6 +225,7 @@ class Database:
                 "media_player_path": "",
                 "preferred_scraper": "tvmaze",
                 "tmdb_api_key": "",
+                "auto_scrape_new_series": "true",
                 "detail_view_mode": "list",  # 'list' or 'grid'
                 "card_size": "medium"
             }
@@ -217,21 +287,37 @@ class Database:
     # ---------------------------------------------------------
     def upsert_series(
         self,
-        root_id: int,
+        root_id: Optional[int],
         folder_path: str,
         folder_name: str,
         display_title: str,
         detected_cover_path: str = "",
         description: str = "",
-        tags: Optional[List[str]] = None
+        tags: Optional[List[str]] = None,
+        has_seasons: bool = False,
+        source_type: str = "local",
+        source_id: str = "",
+        source_url: str = "",
     ) -> int:
-        norm_path = str(Path(folder_path).resolve())
+        norm_path = _normalize_media_path(folder_path)
         tags_json = json.dumps(tags or [])
         now = datetime.now().isoformat()
+        source_type = (source_type or "local").strip() or "local"
+        source_id = (source_id or "").strip()
+        source_url = (source_url or "").strip()
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            existing = cursor.execute("SELECT id, display_title, description, tags, custom_cover_path FROM series WHERE folder_path = ?;", (norm_path,)).fetchone()
+            if source_type != "local" and source_id:
+                # Streaming series are keyed by their composite identifier.
+                existing = cursor.execute(
+                    "SELECT id FROM series WHERE source_type = ? AND source_id = ?;",
+                    (source_type, source_id),
+                ).fetchone()
+            else:
+                existing = cursor.execute(
+                    "SELECT id FROM series WHERE folder_path = ?;", (norm_path,)
+                ).fetchone()
 
             if existing:
                 series_id = existing["id"]
@@ -240,20 +326,29 @@ class Database:
                     UPDATE series
                     SET root_id = ?,
                         folder_name = ?,
+                        source_type = ?,
+                        source_id = ?,
+                        source_url = CASE WHEN ? != '' THEN ? ELSE source_url END,
                         detected_cover_path = CASE WHEN detected_cover_path = '' THEN ? ELSE detected_cover_path END,
                         description = CASE WHEN description = '' THEN ? ELSE description END,
+                        has_seasons = ?,
                         last_scanned = ?
                     WHERE id = ?;
-                """, (root_id, folder_name, detected_cover_path, description, now, series_id))
+                """, (
+                    root_id, folder_name, source_type, source_id, source_url, source_url,
+                    detected_cover_path, description, 1 if has_seasons else 0, now, series_id
+                ))
             else:
                 cursor.execute("""
                     INSERT INTO series (
                         root_id, folder_path, folder_name, display_title,
-                        description, detected_cover_path, tags, created_at, last_scanned
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        description, detected_cover_path, tags, has_seasons,
+                        source_type, source_id, source_url, created_at, last_scanned
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     root_id, norm_path, folder_name, display_title,
-                    description, detected_cover_path, tags_json, now, now
+                    description, detected_cover_path, tags_json, 1 if has_seasons else 0,
+                    source_type, source_id, source_url, now, now
                 ))
                 series_id = cursor.lastrowid
             conn.commit()
@@ -317,6 +412,15 @@ class Database:
                         continue
                 results.append(item)
             return results
+
+    def series_exists(self, folder_path: str) -> bool:
+        """Return True when a series row already exists for this folder."""
+        norm_path = str(Path(folder_path).resolve())
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM series WHERE folder_path = ?;", (norm_path,)
+            ).fetchone()
+            return row is not None
 
     def get_series_by_id(self, series_id: int) -> Optional[Dict[str, Any]]:
         query = """
@@ -400,9 +504,168 @@ class Database:
         self.update_series_customization(series_id, is_hidden=is_hidden)
 
     def delete_series(self, series_id: int) -> None:
+        """Delete a series (and its episodes) plus any managed cover artwork.
+
+        Episodes are removed automatically via the foreign-key cascade. Cover
+        files are only unlinked when they live in Nook's managed covers folder,
+        so artwork that belongs to a real media folder is never touched.
+        """
+        series = self.get_series_by_id(series_id)
         with self.get_connection() as conn:
             conn.execute("DELETE FROM series WHERE id = ?;", (series_id,))
             conn.commit()
+
+        if not series:
+            return
+        covers_dir = get_covers_dir()
+        for key in ("custom_cover_path", "detected_cover_path"):
+            raw_path = (series.get(key) or "").strip()
+            if not raw_path:
+                continue
+            try:
+                path = Path(raw_path)
+                if path.exists() and covers_dir in path.resolve().parents:
+                    path.unlink()
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------
+    # Streaming Site & Stream Series Operations
+    # ---------------------------------------------------------
+    def add_streaming_site(self, base_url: str, name: str = "") -> Optional[int]:
+        """Register (or update) a streaming site from a base URL.
+
+        The site slug and display name are derived from the URL when no
+        explicit ``name`` is supplied. Returns the row id, or ``None`` when the
+        URL could not be parsed.
+        """
+        # Imported lazily to avoid a circular import at module load time.
+        from nook.streaming import normalize_site_url, site_display_name, site_slug
+
+        normalized = normalize_site_url(base_url)
+        if not normalized:
+            return None
+        slug = site_slug(base_url)
+        display = (name or "").strip() or site_display_name(base_url, slug)
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            existing = cursor.execute(
+                "SELECT id FROM streaming_sites WHERE base_url = ?;", (normalized,)
+            ).fetchone()
+            if existing:
+                cursor.execute(
+                    "UPDATE streaming_sites SET name = ?, source_type = ? WHERE id = ?;",
+                    (display, slug, existing["id"]),
+                )
+                site_id = existing["id"]
+            else:
+                cursor.execute(
+                    "INSERT INTO streaming_sites (name, base_url, source_type) VALUES (?, ?, ?);",
+                    (display, normalized, slug),
+                )
+                site_id = cursor.lastrowid
+            conn.commit()
+            return site_id
+
+    def get_streaming_sites(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM streaming_sites ORDER BY added_at ASC, id ASC;"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_streaming_site_by_id(self, site_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM streaming_sites WHERE id = ?;", (site_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def remove_streaming_site(self, site_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM streaming_sites WHERE id = ?;", (site_id,))
+            conn.commit()
+
+    def rename_streaming_site(self, site_id: int, name: str) -> None:
+        """Change the display name of a configured streaming site."""
+        display = (name or "").strip()
+        if not display:
+            return
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE streaming_sites SET name = ? WHERE id = ?;",
+                (display, site_id),
+            )
+            conn.commit()
+
+    def get_series_by_source(self, source_type: str, source_id: str) -> Optional[Dict[str, Any]]:
+        """Look up an imported streaming series by its composite identifier."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM series WHERE source_type = ? AND source_id = ?;",
+                (source_type, source_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def add_streaming_series(
+        self,
+        source_type: str,
+        source_id: str,
+        title: str,
+        source_url: str = "",
+        poster_path: str = "",
+        description: str = "",
+        tags: Optional[List[str]] = None,
+        episodes: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        """Import an online show into the library as a *stream* series.
+
+        The show is stored under a synthetic ``<source>://<id>`` folder path so
+        it never collides with local folders, and its episodes keep the remote
+        stream/page URL as their ``file_path`` so the player can open them.
+        """
+        source_type = (source_type or "stream").strip() or "stream"
+        source_id = (source_id or "").strip()
+        title = (title or "Untitled").strip() or "Untitled"
+        folder_path = f"{source_type}://{source_id or title}"
+        season_numbers = set()
+        for ep in episodes or []:
+            try:
+                season_numbers.add(int(ep.get("season_number") or 1))
+            except (TypeError, ValueError):
+                season_numbers.add(1)
+        has_seasons = len(season_numbers) > 1
+
+        series_id = self.upsert_series(
+            root_id=None,
+            folder_path=folder_path,
+            folder_name=title,
+            display_title=title,
+            detected_cover_path=poster_path,
+            description=description,
+            tags=tags,
+            has_seasons=has_seasons,
+            source_type=source_type,
+            source_id=source_id,
+            source_url=source_url,
+        )
+
+        for ep in episodes or []:
+            media_url = (ep.get("url") or source_url or "").strip()
+            if not media_url:
+                continue
+            title_text = (ep.get("title") or "").strip() or "Episode"
+            self.upsert_episode(
+                series_id=series_id,
+                file_path=media_url,
+                file_name=title_text,
+                clean_title=title_text,
+                season_number=int(ep.get("season_number") or 1),
+                episode_number=int(ep.get("number") or 0),
+                season_name=(ep.get("season_name") or "Season 1"),
+            )
+        return series_id
 
     # ---------------------------------------------------------
     # Episode Operations
@@ -416,9 +679,11 @@ class Database:
         season_number: int = 0,
         episode_number: int = 0,
         file_size: int = 0,
-        duration_seconds: int = 0
+        duration_seconds: int = 0,
+        season_name: str = ""
     ) -> int:
-        norm_path = str(Path(file_path).resolve())
+        # Stream URLs must be stored verbatim rather than path-resolved.
+        norm_path = _normalize_media_path(file_path)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             existing = cursor.execute("SELECT id FROM episodes WHERE file_path = ?;", (norm_path,)).fetchone()
@@ -432,21 +697,23 @@ class Database:
                         season_number = ?,
                         episode_number = ?,
                         file_size = ?,
-                        duration_seconds = CASE WHEN ? > 0 THEN ? ELSE duration_seconds END
+                        duration_seconds = CASE WHEN ? > 0 THEN ? ELSE duration_seconds END,
+                        season_name = CASE WHEN ? != '' THEN ? ELSE season_name END
                     WHERE id = ?;
                 """, (
                     series_id, file_name, clean_title, season_number,
-                    episode_number, file_size, duration_seconds, duration_seconds, ep_id
+                    episode_number, file_size, duration_seconds, duration_seconds,
+                    season_name, season_name, ep_id
                 ))
             else:
                 cursor.execute("""
                     INSERT INTO episodes (
                         series_id, file_path, file_name, clean_title,
-                        season_number, episode_number, file_size, duration_seconds
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                        season_number, episode_number, file_size, duration_seconds, season_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     series_id, norm_path, file_name, clean_title,
-                    season_number, episode_number, file_size, duration_seconds
+                    season_number, episode_number, file_size, duration_seconds, season_name
                 ))
                 ep_id = cursor.lastrowid
             conn.commit()
@@ -459,15 +726,55 @@ class Database:
                 WHERE series_id = ?
                 ORDER BY
                     CASE WHEN season_number = 0 THEN 9999 ELSE season_number END ASC,
+                    season_name ASC,
                     CASE WHEN episode_number = 0 THEN 9999 ELSE episode_number END ASC,
                     file_name ASC;
             """, (series_id,)).fetchall()
             return [dict(r) for r in rows]
 
+    def mark_season_watched(self, series_id: int, season_name: str, watched: bool = True) -> None:
+        now = datetime.now().isoformat()
+        with self.get_connection() as conn:
+            conn.execute("""
+                UPDATE episodes
+                SET watched = ?,
+                    last_watched_at = CASE WHEN ? = 1 THEN ? ELSE last_watched_at END
+                WHERE series_id = ? AND (season_name = ? OR (? = '' AND (season_name IS NULL OR season_name = '')));
+            """, (1 if watched else 0, 1 if watched else 0, now, series_id, season_name, season_name))
+            conn.commit()
+
+    def mark_episodes_watched(self, episode_ids: List[int], watched: bool = True) -> None:
+        """Mark an explicit set of episodes watched/unwatched.
+
+        Used by season headers so that grouping never depends on
+        season_name matching (legacy rows may have an empty season_name).
+        """
+        if not episode_ids:
+            return
+        now = datetime.now().isoformat()
+        placeholders = ",".join("?" for _ in episode_ids)
+        with self.get_connection() as conn:
+            conn.execute(f"""
+                UPDATE episodes
+                SET watched = ?,
+                    last_watched_at = CASE WHEN ? = 1 THEN ? ELSE last_watched_at END
+                WHERE id IN ({placeholders});
+            """, [1 if watched else 0, 1 if watched else 0, now] + list(episode_ids))
+            conn.commit()
+
     def get_episode_by_id(self, episode_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM episodes WHERE id = ?;", (episode_id,)).fetchone()
             return dict(row) if row else None
+
+    def remove_episode_from_history(self, episode_id: int) -> None:
+        """Drop an episode from Continue Watching without touching watch state."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE episodes SET last_watched_at = NULL WHERE id = ?;",
+                (episode_id,)
+            )
+            conn.commit()
 
     def get_recently_watched_episodes(self, limit: int = 8) -> List[Dict[str, Any]]:
         """Return recently watched episodes with series information."""
@@ -564,7 +871,7 @@ class Database:
             conn.commit()
 
     def cleanup_missing_episodes(self, series_id: int, active_file_paths: List[str]) -> int:
-        norm_paths = [str(Path(p).resolve()) for p in active_file_paths]
+        norm_paths = [_normalize_media_path(p) for p in active_file_paths]
         with self.get_connection() as conn:
             if not norm_paths:
                 cursor = conn.execute("DELETE FROM episodes WHERE series_id = ?;", (series_id,))
@@ -579,7 +886,7 @@ class Database:
             return deleted_count
 
     def cleanup_missing_series(self, root_id: int, active_folder_paths: List[str]) -> int:
-        norm_paths = [str(Path(p).resolve()) for p in active_folder_paths]
+        norm_paths = [_normalize_media_path(p) for p in active_folder_paths]
         with self.get_connection() as conn:
             if not norm_paths:
                 cursor = conn.execute("DELETE FROM series WHERE root_id = ?;", (root_id,))

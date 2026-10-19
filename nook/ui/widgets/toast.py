@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QPoint, QPropertyAnimation, QRect, QTimer, Qt
+from PyQt6.QtCore import QPoint, QPropertyAnimation, QTimer, Qt
 from PyQt6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QWidget
+
+from nook.styles import color
+from nook.ui.icons import pixmap
 
 
 class ToastNotification(QWidget):
@@ -18,18 +21,24 @@ class ToastNotification(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setContentsMargins(18, 11, 20, 11)
+        layout.setSpacing(9)
+
+        self.icon_label = QLabel(self)
+        self.icon_label.setPixmap(pixmap("check", size=15, color=color("accent")))
+        self.icon_label.setFixedSize(16, 16)
+        layout.addWidget(self.icon_label)
 
         self.label = QLabel(message, self)
         self.label.setStyleSheet("color: #FFFFFF; font-weight: 600; font-size: 13px;")
         layout.addWidget(self.label)
 
-        self.setStyleSheet("""
-            ToastNotification {
-                background-color: rgba(30, 24, 20, 0.92);
-                border: 1px solid rgba(229, 169, 60, 0.4);
-                border-radius: 18px;
-            }
+        self.setStyleSheet(f"""
+            ToastNotification {{
+                background-color: {color('bg_elevated')};
+                border: none;
+                border-radius: 20px;
+            }}
         """)
 
         # Opacity animation

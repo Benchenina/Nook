@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
 
 from nook.database import Database
 from nook.scraper import OnlineMetadataScraper
+from nook.styles import color, color_rgba
+from nook.ui.icons import icon, pixmap
 from nook.ui.widgets.poster_widget import PosterWidget
 
 
@@ -86,16 +88,16 @@ class ScraperResultCard(QFrame):
         year = self.result_data.get("year")
         if year:
             year_lbl = QLabel(f"({year})", self)
-            year_lbl.setStyleSheet("color: #847569; font-size: 12px;")
+            year_lbl.setStyleSheet(f"color: {color('text_muted')}; font-size: 12px;")
             title_row.addWidget(year_lbl)
 
         provider = self.result_data.get("provider", "TV")
         prov_lbl = QLabel(provider, self)
-        prov_lbl.setStyleSheet("""
-            color: #E5A93C;
-            background-color: rgba(229, 169, 60, 0.12);
-            border-radius: 6px;
-            padding: 2px 6px;
+        prov_lbl.setStyleSheet(f"""
+            color: {color('accent')};
+            background-color: {color_rgba('accent', 0.14)};
+            border-radius: 8px;
+            padding: 3px 8px;
             font-size: 10px;
             font-weight: 600;
         """)
@@ -108,14 +110,14 @@ class ScraperResultCard(QFrame):
         tags = self.result_data.get("tags") or []
         if tags:
             tag_lbl = QLabel(" • ".join(tags[:4]), self)
-            tag_lbl.setStyleSheet("color: #847569; font-size: 11px;")
+            tag_lbl.setStyleSheet(f"color: {color('text_muted')}; font-size: 11px;")
             text_layout.addWidget(tag_lbl)
 
         # Description excerpt
         desc = self.result_data.get("description", "")
         if desc:
             desc_lbl = QLabel(desc[:160] + ("..." if len(desc) > 160 else ""), self)
-            desc_lbl.setStyleSheet("color: #BFAFA1; font-size: 11px;")
+            desc_lbl.setStyleSheet(f"color: {color('text_secondary')}; font-size: 11px;")
             desc_lbl.setWordWrap(True)
             text_layout.addWidget(desc_lbl)
 
@@ -157,12 +159,20 @@ class ScraperDialog(QDialog):
         main_layout.setSpacing(14)
 
         # Header
-        header = QLabel("🌐 Fetch Online Metadata", self)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+        header_icon = QLabel(self)
+        header_icon.setPixmap(pixmap("globe", size=20))
+        header_row.addWidget(header_icon)
+
+        header = QLabel("Fetch Online Metadata", self)
         h_font = QFont(self.font())
         h_font.setPointSize(16)
         h_font.setBold(True)
         header.setFont(h_font)
-        main_layout.addWidget(header)
+        header_row.addWidget(header)
+        header_row.addStretch()
+        main_layout.addLayout(header_row)
 
         # Search bar & Provider selector
         search_row = QHBoxLayout()
@@ -188,6 +198,8 @@ class ScraperDialog(QDialog):
 
         self.search_btn = QPushButton("Search", self)
         self.search_btn.setObjectName("primaryBtn")
+        self.search_btn.setIcon(icon("search", size=15, color="#0A0A0A"))
+        self.search_btn.setIconSize(QSize(15, 15))
         self.search_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.search_btn.clicked.connect(self._start_search)
         search_row.addWidget(self.search_btn)
@@ -202,7 +214,7 @@ class ScraperDialog(QDialog):
         main_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("", self)
-        self.status_label.setStyleSheet("color: #847569; font-size: 12px;")
+        self.status_label.setStyleSheet(f"color: {color('text_muted')}; font-size: 12px;")
         main_layout.addWidget(self.status_label)
 
         # Results Scroll Area
@@ -269,31 +281,12 @@ class ScraperDialog(QDialog):
 
     def _apply_metadata(self, result: Dict[str, Any]) -> None:
         self.status_label.setText("Downloading cover and applying metadata...")
-        poster_url = result.get("poster_url")
-        saved_cover = None
-
-        if poster_url:
-            saved_cover = self.scraper.download_poster(
-                poster_url,
-                series_name=result.get("title", "series")
-            )
-
-        title = result.get("title")
-        year = result.get("year")
-        if year and year not in (title or ""):
-            final_title = f"{title} ({year})"
-        else:
-            final_title = title or self.series_data.get("display_title")
-
-        desc = result.get("description") or self.series_data.get("description", "")
-        tags = result.get("tags") or self.series_data.get("tags_list") or []
-
-        self.db.update_series_customization(
-            series_id=self.series_id,
-            display_title=final_title,
-            custom_cover_path=saved_cover if saved_cover else None,
-            tags=tags,
-            description=desc
+        self.scraper.apply_result_to_series(
+            self.series_id,
+            result,
+            fallback_title=self.series_data.get("display_title"),
+            fallback_description=self.series_data.get("description", ""),
+            fallback_tags=self.series_data.get("tags_list"),
         )
 
         self.metadata_applied.emit(self.series_id)

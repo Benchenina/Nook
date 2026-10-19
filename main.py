@@ -17,12 +17,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QApplication
 
 from nook import __app_name__, __version__
 from nook.database import Database
 from nook.scanner import LibraryScanner
+from nook.scraper import auto_match_new_series
 from nook.ui.main_window import MainWindow
 
 
@@ -54,12 +55,19 @@ def main() -> None:
         scanner = LibraryScanner(db)
         s_count, e_count = scanner.scan_all()
         print(f"[{__app_name__}] Scan complete: {s_count} series, {e_count} episodes indexed.")
+        matched = auto_match_new_series(
+            db,
+            scanner.new_series,
+            on_progress=lambda index, total, msg: print(f"[{__app_name__}] {msg}"),
+        )
+        if matched:
+            print(f"[{__app_name__}] Auto-applied online metadata to {matched} new folder(s).")
         sys.exit(0)
 
     # Initialize PyQt6 GUI Application
     app = QApplication(sys.argv)
     app.setApplicationName(__app_name__)
-    app.setApplicationDisplayName("Nook — Cozy Video Library")
+    app.setApplicationDisplayName("Nook")
     app.setOrganizationName("NookApp")
 
     # Set cross-platform clean default font
@@ -68,8 +76,20 @@ def main() -> None:
     font.setPointSize(10)
     app.setFont(font)
 
+    # Set application icon (supports running from source or frozen AppImage)
+    base_dir = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
+    app_icon = QIcon()
+    for icon_name in ("icon.png", "icon.ico"):
+        candidate = base_dir / icon_name
+        if candidate.exists():
+            app_icon = QIcon(str(candidate))
+            app.setWindowIcon(app_icon)
+            break
+
     # Launch Main Window
     window = MainWindow(db=db)
+    if not app_icon.isNull():
+        window.setWindowIcon(app_icon)
     window.show()
 
     sys.exit(app.exec())

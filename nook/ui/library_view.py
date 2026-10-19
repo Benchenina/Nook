@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QCursor, QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -20,6 +21,8 @@ from PyQt6.QtWidgets import (
 from nook.database import Database
 from nook.player import MediaPlayer
 from nook.ui.customization_modal import CustomizationModal
+from nook.styles import color
+from nook.ui.icons import icon, pixmap
 from nook.ui.recently_watched import RecentlyWatchedCarousel
 from nook.ui.series_card import SeriesCard
 from nook.ui.widgets.flow_layout import FlowLayout
@@ -63,6 +66,7 @@ class LibraryView(QWidget):
             self.carousel = RecentlyWatchedCarousel(self)
             self.carousel.resume_episode.connect(self._resume_episode)
             self.carousel.open_series.connect(self.series_selected.emit)
+            self.carousel.remove_episode.connect(self._remove_from_history)
             main_layout.addWidget(self.carousel)
         else:
             self.carousel = None
@@ -89,10 +93,11 @@ class LibraryView(QWidget):
         toolbar.addWidget(self.tags_scroll, stretch=1)
 
         # Show Hidden Toggle Button
-        self.show_hidden_btn = QPushButton("👁 Hidden", self)
+        self.show_hidden_btn = QPushButton("Hidden", self)
         self.show_hidden_btn.setObjectName("secondaryBtn")
         self.show_hidden_btn.setCheckable(True)
         self.show_hidden_btn.setChecked(False)
+        self.show_hidden_btn.setIconSize(QSize(16, 16))
         self.show_hidden_btn.setToolTip("Toggle displaying hidden items in library")
         self.show_hidden_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.show_hidden_btn.clicked.connect(self._toggle_show_hidden)
@@ -100,7 +105,7 @@ class LibraryView(QWidget):
 
         # Sort dropdown
         sort_lbl = QLabel("Sort by:", self)
-        sort_lbl.setStyleSheet("color: #847569; font-weight: 500; font-size: 13px;")
+        sort_lbl.setStyleSheet(f"color: {color('text_muted')}; font-weight: 500; font-size: 13px;")
         toolbar.addWidget(sort_lbl)
 
         self.sort_combo = QComboBox(self)
@@ -131,10 +136,8 @@ class LibraryView(QWidget):
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.setSpacing(12)
 
-        self.empty_icon = QLabel("📚", self.empty_widget)
-        font_icon = QFont(self.font())
-        font_icon.setPointSize(48)
-        self.empty_icon.setFont(font_icon)
+        self.empty_icon = QLabel(self.empty_widget)
+        self.empty_icon.setPixmap(pixmap("library", size=72))
         self.empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(self.empty_icon)
 
@@ -147,12 +150,14 @@ class LibraryView(QWidget):
         empty_layout.addWidget(self.empty_title)
 
         self.empty_subtitle = QLabel("Add a root folder in Settings or scan your library to get started.", self.empty_widget)
-        self.empty_subtitle.setStyleSheet("color: #847569; font-size: 13px;")
+        self.empty_subtitle.setStyleSheet(f"color: {color('text_muted')}; font-size: 13px;")
         self.empty_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(self.empty_subtitle)
 
-        self.empty_action_btn = QPushButton("⚙ Open Settings", self.empty_widget)
+        self.empty_action_btn = QPushButton("Open Settings", self.empty_widget)
         self.empty_action_btn.setObjectName("primaryBtn")
+        self.empty_action_btn.setIcon(icon("gear", size=16, color="#0A0A0A"))
+        self.empty_action_btn.setIconSize(QSize(16, 16))
         self.empty_action_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.empty_action_btn.clicked.connect(self.open_settings_requested.emit)
         empty_layout.addWidget(self.empty_action_btn, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -167,8 +172,19 @@ class LibraryView(QWidget):
         self.show_hidden_btn.style().polish(self.show_hidden_btn)
         self.refresh()
 
+    def refresh_icons(self) -> None:
+        """Re-render icons after a theme change."""
+        self.show_hidden_btn.setIcon(icon("eye" if self.show_hidden else "eye-off", size=16))
+        self.empty_icon.setPixmap(pixmap("library", size=72))
+        self.empty_action_btn.setIcon(icon("gear", size=16, color="#0A0A0A"))
+        if self.carousel:
+            self.carousel.refresh_icons()
+        # Rebuild the grid so poster/badge icons pick up the new theme colour.
+        self.refresh()
+
     def refresh(self) -> None:
         """Reload all series and refresh the grid view."""
+        self.show_hidden_btn.setIcon(icon("eye" if self.show_hidden else "eye-off", size=16))
         # 1. Update Recently Watched Carousel if enabled
         if self.carousel:
             show_carousel = self.db.get_setting("show_recently_watched", "true").lower() == "true"
@@ -183,10 +199,10 @@ class LibraryView(QWidget):
         hidden_count = len(all_hidden)
         if hidden_count > 0:
             self.show_hidden_btn.setVisible(True)
-            self.show_hidden_btn.setText(f"👁 Hidden ({hidden_count})")
+            self.show_hidden_btn.setText(f"Hidden ({hidden_count})")
         else:
             self.show_hidden_btn.setVisible(self.show_hidden)
-            self.show_hidden_btn.setText("👁 Hidden")
+            self.show_hidden_btn.setText("Hidden")
 
         self._refresh_tags(hidden_count)
 
@@ -226,7 +242,7 @@ class LibraryView(QWidget):
             all_tags.append("Hidden")
 
         for t in all_tags:
-            label = f"👁 Hidden ({hidden_count})" if t == "Hidden" else t
+            label = f"Hidden ({hidden_count})" if t == "Hidden" else t
             btn = QPushButton(label, self.tags_container)
             btn.setObjectName("tagPill")
             btn.setProperty("active", "true" if t.lower() == self.current_tag.lower() else "false")
@@ -288,6 +304,7 @@ class LibraryView(QWidget):
             card.unhide_requested.connect(self._unhide_series)
             card.play_next_requested.connect(self._play_next_series_episode)
             card.mark_all_watched.connect(self._mark_series_watched)
+            card.remove_requested.connect(self._remove_series)
 
             self.grid_layout.addWidget(card)
             card.show()
@@ -303,7 +320,7 @@ class LibraryView(QWidget):
     def _toggle_card_favorite(self, series_id: int, new_fav_state: bool) -> None:
         self.db.set_series_favorite(series_id, new_fav_state)
         self.refresh()
-        status = "Added to Favorites ♥" if new_fav_state else "Removed from Favorites"
+        status = "Added to Favorites" if new_fav_state else "Removed from Favorites"
         ToastNotification.show_toast(self.window(), status)
 
     def _customize_series(self, series_id: int) -> None:
@@ -342,3 +359,41 @@ class LibraryView(QWidget):
             ToastNotification.show_toast(self.window(), f"Player Error: {err}")
         else:
             self.refresh()
+
+    def _remove_from_history(self, episode_id: int) -> None:
+        """Remove a single episode from the Continue Watching strip."""
+        self.db.remove_episode_from_history(episode_id)
+        self.refresh()
+        ToastNotification.show_toast(self.window(), "Removed from Continue Watching.")
+
+    def _remove_series(self, series_id: int) -> None:
+        """Delete an imported streaming show from the library.
+
+        Only streaming sources can be removed this way - local folders are the
+        scanner's territory and would simply reappear on the next scan.
+        """
+        series = self.db.get_series_by_id(series_id)
+        if not series:
+            return
+        if (series.get("source_type") or "local").lower() == "local":
+            ToastNotification.show_toast(
+                self.window(), "Local series are managed by the scanner and cannot be removed here."
+            )
+            return
+
+        title = series.get("display_title") or "this show"
+        answer = QMessageBox.question(
+            self.window(),
+            "Remove from Library",
+            f"Remove '{title}' from your library?\n\n"
+            "This only removes it from Nook - the streaming site itself is untouched.\n"
+            "You can add it again from the Browse tab.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.db.delete_series(series_id)
+        self.refresh()
+        ToastNotification.show_toast(self.window(), f"Removed '{title}' from your library.")

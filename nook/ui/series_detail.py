@@ -23,17 +23,118 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from nook.database import Database
 from nook.player import MediaPlayer
+from nook.streaming import is_stream_url
+from nook.styles import color
 from nook.ui.customization_modal import CustomizationModal
+from nook.ui.icons import icon, pixmap
 from nook.ui.scraper_dialog import ScraperDialog
 from nook.ui.widgets.flow_layout import FlowLayout
 from nook.ui.widgets.poster_widget import PosterWidget
 from nook.ui.widgets.toast import ToastNotification
+
+
+
+class SeasonSectionHeader(QFrame):
+    """Collapsible header row for a season group in the episode list."""
+
+    mark_watched_signal = pyqtSignal(str, bool)   # season_name, watched
+    collapse_toggled = pyqtSignal(str, bool)        # season_name, is_collapsed
+
+    def __init__(
+        self,
+        season_name: str,
+        total: int,
+        watched: int,
+        is_collapsed: bool = False,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.season_name = season_name
+        self._is_collapsed = is_collapsed
+        self.setObjectName("seasonHeader")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+
+        # Collapse toggle arrow
+        self._arrow_btn = QPushButton(self)
+        self._arrow_btn.setObjectName("iconBtn")
+        self._arrow_btn.setIcon(icon("chevron-right" if is_collapsed else "chevron-down", size=16))
+        self._arrow_btn.setIconSize(QSize(16, 16))
+        self._arrow_btn.setFixedSize(30, 30)
+        self._arrow_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._arrow_btn.clicked.connect(self._toggle)
+        layout.addWidget(self._arrow_btn)
+
+        # Season name label
+        name_lbl = QLabel(season_name, self)
+        name_font = QFont(name_lbl.font())
+        name_font.setPointSize(13)
+        name_font.setBold(True)
+        name_lbl.setFont(name_font)
+        layout.addWidget(name_lbl)
+
+        # Episode count / progress label
+        pct = int((watched / max(1, total)) * 100)
+        self._stats_lbl = QLabel(f"{watched} / {total} watched  ({pct}%)", self)
+        self._stats_lbl.setObjectName("seasonStats")
+        layout.addWidget(self._stats_lbl)
+
+        # Mini progress bar
+        self._prog_bar = QProgressBar(self)
+        self._prog_bar.setFixedSize(120, 6)
+        self._prog_bar.setTextVisible(False)
+        self._prog_bar.setMaximum(max(1, total))
+        self._prog_bar.setValue(watched)
+        layout.addWidget(self._prog_bar)
+
+        layout.addStretch()
+
+        # Mark Season Watched / Unwatched buttons
+        watch_btn = QPushButton("All Watched", self)
+        watch_btn.setObjectName("secondaryBtn")
+        watch_btn.setIcon(icon("check", size=15))
+        watch_btn.setIconSize(QSize(15, 15))
+        watch_btn.setFixedHeight(32)
+        watch_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        watch_btn.clicked.connect(lambda: self.mark_watched_signal.emit(self.season_name, True))
+        layout.addWidget(watch_btn)
+
+        unwatch_btn = QPushButton("All Unwatched", self)
+        unwatch_btn.setObjectName("secondaryBtn")
+        unwatch_btn.setIcon(icon("refresh", size=15))
+        unwatch_btn.setIconSize(QSize(15, 15))
+        unwatch_btn.setFixedHeight(32)
+        unwatch_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        unwatch_btn.clicked.connect(lambda: self.mark_watched_signal.emit(self.season_name, False))
+        layout.addWidget(unwatch_btn)
+
+        # Make header itself clickable to collapse
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle()
+        super().mousePressEvent(event)
+
+    def _toggle(self) -> None:
+        self._is_collapsed = not self._is_collapsed
+        self._sync_arrow()
+        self.collapse_toggled.emit(self.season_name, self._is_collapsed)
+
+    def _sync_arrow(self) -> None:
+        self._arrow_btn.setIcon(icon("chevron-right" if self._is_collapsed else "chevron-down", size=16))
+
+    def refresh_icons(self) -> None:
+        self._sync_arrow()
 
 
 class EpisodeRowWidget(QFrame):
@@ -76,15 +177,15 @@ class EpisodeRowWidget(QFrame):
             badge_text = "FILE"
 
         badge = QLabel(badge_text, self)
-        badge.setStyleSheet("""
-            QLabel {
-                background-color: #3E3530;
-                color: #E5A93C;
+        badge.setStyleSheet(f"""
+            QLabel {{
+                background-color: {color('bg_elevated')};
+                color: {color('accent')};
                 font-weight: 700;
                 font-size: 11px;
-                border-radius: 6px;
-                padding: 3px 8px;
-            }
+                border-radius: 8px;
+                padding: 4px 9px;
+            }}
         """)
         layout.addWidget(badge)
 
@@ -102,7 +203,7 @@ class EpisodeRowWidget(QFrame):
 
         file_name = self.ep_data.get("file_name", "")
         self.sub_label = QLabel(file_name, self)
-        self.sub_label.setStyleSheet("color: #847569; font-size: 11px;")
+        self.sub_label.setStyleSheet(f"color: {color('text_muted')}; font-size: 11px;")
         title_box.addWidget(self.sub_label)
 
         layout.addLayout(title_box, stretch=3)
@@ -111,7 +212,7 @@ class EpisodeRowWidget(QFrame):
         size_bytes = self.ep_data.get("file_size", 0)
         size_str = self._format_size(size_bytes)
         size_lbl = QLabel(size_str, self)
-        size_lbl.setStyleSheet("color: #847569; font-size: 11px; font-weight: 500;")
+        size_lbl.setStyleSheet(f"color: {color('text_muted')}; font-size: 11px; font-weight: 500;")
         layout.addWidget(size_lbl)
 
         # 5. Playback progress bar & timestamp
@@ -139,7 +240,7 @@ class EpisodeRowWidget(QFrame):
         prog_box.addWidget(self.progress_bar)
 
         self.time_lbl = QLabel(time_str, prog_widget)
-        self.time_lbl.setStyleSheet("color: #847569; font-size: 10px; font-weight: 500;")
+        self.time_lbl.setStyleSheet(f"color: {color('text_muted')}; font-size: 10px; font-weight: 500;")
         self.time_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         prog_box.addWidget(self.time_lbl)
 
@@ -150,19 +251,24 @@ class EpisodeRowWidget(QFrame):
         btn_box.setSpacing(8)
 
         # Resume / Play Button
-        self.play_btn = QPushButton("▶ Resume" if pos_sec > 0 and not self.ep_data.get("watched") else "▶ Play", self)
+        self.play_btn = QPushButton("Resume" if pos_sec > 0 and not self.ep_data.get("watched") else "Play", self)
         if pos_sec > 0 and not self.ep_data.get("watched"):
             self.play_btn.setObjectName("primaryBtn")
+            self.play_btn.setIcon(icon("play", size=14, color="#0A0A0A"))
         else:
             self.play_btn.setObjectName("secondaryBtn")
+            self.play_btn.setIcon(icon("play", size=14))
+        self.play_btn.setIconSize(QSize(14, 14))
         self.play_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.play_btn.clicked.connect(lambda: self.play_requested.emit(self.episode_id, True))
         btn_box.addWidget(self.play_btn)
 
         # More Options button
-        more_btn = QPushButton("⋯", self)
+        more_btn = QPushButton(self)
         more_btn.setObjectName("iconBtn")
-        more_btn.setFixedSize(32, 32)
+        more_btn.setIcon(icon("more", size=18))
+        more_btn.setIconSize(QSize(18, 18))
+        more_btn.setFixedSize(34, 34)
         more_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         more_btn.clicked.connect(lambda: self._show_context_menu(more_btn.mapToGlobal(QPoint(0, more_btn.height()))))
         btn_box.addWidget(more_btn)
@@ -194,27 +300,30 @@ class EpisodeRowWidget(QFrame):
 
         pos_sec = self.ep_data.get("playback_position", 0)
         if pos_sec > 0:
-            resume_act = menu.addAction(f"▶ Resume from {MediaPlayer.format_timestamp(pos_sec)}")
+            resume_act = menu.addAction(icon("play", size=16), f"Resume from {MediaPlayer.format_timestamp(pos_sec)}")
             resume_act.triggered.connect(lambda: self.play_requested.emit(self.episode_id, True))
 
-        play_start_act = menu.addAction("▶ Play from Beginning")
+        play_start_act = menu.addAction(icon("play", size=16), "Play from Beginning")
         play_start_act.triggered.connect(lambda: self.play_requested.emit(self.episode_id, False))
 
         menu.addSeparator()
 
-        set_time_act = menu.addAction("⏱ Set Resume Timestamp...")
+        set_time_act = menu.addAction(icon("clock", size=16), "Set Resume Timestamp...")
         set_time_act.triggered.connect(self._prompt_set_timestamp)
 
-        reset_time_act = menu.addAction("↺ Reset Playback Progress")
+        reset_time_act = menu.addAction(icon("refresh", size=16), "Reset Playback Progress")
         reset_time_act.triggered.connect(self._reset_progress)
 
         menu.addSeparator()
 
         is_watched = bool(self.ep_data.get("watched", 0))
-        toggle_watched_act = menu.addAction("○ Mark Unwatched" if is_watched else "✓ Mark Watched")
+        toggle_watched_act = menu.addAction(
+            icon("circle" if is_watched else "check", size=16),
+            "Mark Unwatched" if is_watched else "Mark Watched",
+        )
         toggle_watched_act.triggered.connect(lambda: self._on_watched_toggled(not is_watched))
 
-        folder_act = menu.addAction("📁 Open File Location")
+        folder_act = menu.addAction(icon("folder-open", size=16), "Open File Location")
         folder_act.triggered.connect(self._open_file_location)
 
         menu.exec(pos)
@@ -251,7 +360,14 @@ class EpisodeRowWidget(QFrame):
         return 0
 
     def _open_file_location(self) -> None:
-        file_path = Path(self.ep_data.get("file_path", ""))
+        reference = (self.ep_data.get("file_path") or "").strip()
+        if is_stream_url(reference):
+            # Stream episodes live online - open the source in the browser.
+            import webbrowser
+
+            webbrowser.open(reference)
+            return
+        file_path = Path(reference)
         if not file_path.exists():
             return
         folder = file_path.parent
@@ -280,6 +396,8 @@ class SeriesDetailView(QWidget):
         self.series_id: Optional[int] = None
         self.series_data: Dict[str, Any] = {}
         self.episodes: List[Dict[str, Any]] = []
+        # Tracks which season sections the user has collapsed: {season_name: bool}
+        self._collapsed_seasons: Dict[str, bool] = {}
 
         self.view_mode = self.db.get_setting("detail_view_mode", "list")
 
@@ -292,8 +410,10 @@ class SeriesDetailView(QWidget):
 
         # 1. Back button header
         top_bar = QHBoxLayout()
-        self.back_btn = QPushButton("← Back to Library", self)
+        self.back_btn = QPushButton("Back to Library", self)
         self.back_btn.setObjectName("secondaryBtn")
+        self.back_btn.setIcon(icon("arrow-left", size=16))
+        self.back_btn.setIconSize(QSize(16, 16))
         self.back_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.back_btn.clicked.connect(self.back_requested.emit)
         top_bar.addWidget(self.back_btn)
@@ -332,7 +452,8 @@ class SeriesDetailView(QWidget):
         self.title_lbl.setFont(t_font)
         title_row.addWidget(self.title_lbl)
 
-        self.fav_btn = QPushButton("♥ Favorite", self.hero_card)
+        self.fav_btn = QPushButton("Favorite", self.hero_card)
+        self.fav_btn.setIconSize(QSize(16, 16))
         self.fav_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.fav_btn.clicked.connect(self._toggle_favorite)
         title_row.addWidget(self.fav_btn)
@@ -350,7 +471,7 @@ class SeriesDetailView(QWidget):
 
         # Description / synopsis
         self.desc_lbl = QLabel(self.hero_card)
-        self.desc_lbl.setStyleSheet("color: #BFAFA1; font-size: 13px; line-height: 1.4;")
+        self.desc_lbl.setStyleSheet(f"color: {color('text_secondary')}; font-size: 13px; line-height: 1.4;")
         self.desc_lbl.setWordWrap(True)
         self.desc_lbl.setMaximumHeight(65)
         info_layout.addWidget(self.desc_lbl)
@@ -361,7 +482,7 @@ class SeriesDetailView(QWidget):
 
         stats_row = QHBoxLayout()
         self.stats_lbl = QLabel("0 episodes • 0 watched", self.hero_card)
-        self.stats_lbl.setStyleSheet("color: #847569; font-size: 12px; font-weight: 600;")
+        self.stats_lbl.setStyleSheet(f"color: {color('text_muted')}; font-size: 12px; font-weight: 600;")
         stats_row.addWidget(self.stats_lbl)
         stats_row.addStretch()
         stats_box.addLayout(stats_row)
@@ -377,29 +498,39 @@ class SeriesDetailView(QWidget):
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
 
-        self.play_next_btn = QPushButton("▶ Play Next Episode", self.hero_card)
+        self.play_next_btn = QPushButton("Play Next Episode", self.hero_card)
         self.play_next_btn.setObjectName("primaryBtn")
+        self.play_next_btn.setIcon(icon("play", size=15, color="#0A0A0A"))
+        self.play_next_btn.setIconSize(QSize(15, 15))
         self.play_next_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.play_next_btn.clicked.connect(self._play_next_episode)
         action_row.addWidget(self.play_next_btn)
 
-        self.customize_btn = QPushButton("⚙ Customize", self.hero_card)
+        self.customize_btn = QPushButton("Customize", self.hero_card)
+        self.customize_btn.setIcon(icon("gear", size=15))
+        self.customize_btn.setIconSize(QSize(15, 15))
         self.customize_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.customize_btn.clicked.connect(self._open_customization)
         action_row.addWidget(self.customize_btn)
 
-        self.scrape_btn = QPushButton("🌐 Online Info", self.hero_card)
+        self.scrape_btn = QPushButton("Online Info", self.hero_card)
+        self.scrape_btn.setIcon(icon("globe", size=15))
+        self.scrape_btn.setIconSize(QSize(15, 15))
         self.scrape_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.scrape_btn.clicked.connect(self._open_scraper)
         action_row.addWidget(self.scrape_btn)
 
-        self.open_folder_btn = QPushButton("📁 Folder", self.hero_card)
+        self.open_folder_btn = QPushButton("Folder", self.hero_card)
+        self.open_folder_btn.setIcon(icon("folder-open", size=15))
+        self.open_folder_btn.setIconSize(QSize(15, 15))
         self.open_folder_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.open_folder_btn.clicked.connect(self._open_series_folder)
         action_row.addWidget(self.open_folder_btn)
 
-        self.unhide_btn = QPushButton("👁 Unhide Series", self.hero_card)
+        self.unhide_btn = QPushButton("Unhide Series", self.hero_card)
         self.unhide_btn.setObjectName("secondaryBtn")
+        self.unhide_btn.setIcon(icon("eye", size=15))
+        self.unhide_btn.setIconSize(QSize(15, 15))
         self.unhide_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.unhide_btn.clicked.connect(self._unhide_series)
         self.unhide_btn.setVisible(False)
@@ -423,26 +554,34 @@ class SeriesDetailView(QWidget):
         toolbar.addStretch()
 
         # Mark all watched / unwatched
-        mark_all_btn = QPushButton("✓ Mark All Watched", self)
+        mark_all_btn = QPushButton("Mark All Watched", self)
         mark_all_btn.setObjectName("secondaryBtn")
+        mark_all_btn.setIcon(icon("check", size=15))
+        mark_all_btn.setIconSize(QSize(15, 15))
         mark_all_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         mark_all_btn.clicked.connect(lambda: self._mark_all_watched(True))
         toolbar.addWidget(mark_all_btn)
 
-        mark_unwatched_btn = QPushButton("↺ Mark All Unwatched", self)
+        mark_unwatched_btn = QPushButton("Mark All Unwatched", self)
         mark_unwatched_btn.setObjectName("secondaryBtn")
+        mark_unwatched_btn.setIcon(icon("refresh", size=15))
+        mark_unwatched_btn.setIconSize(QSize(15, 15))
         mark_unwatched_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         mark_unwatched_btn.clicked.connect(lambda: self._mark_all_watched(False))
         toolbar.addWidget(mark_unwatched_btn)
 
         # View Mode Toggle: List vs Grid
-        self.mode_list_btn = QPushButton("≡ List", self)
+        self.mode_list_btn = QPushButton("List", self)
+        self.mode_list_btn.setIcon(icon("list", size=15))
+        self.mode_list_btn.setIconSize(QSize(15, 15))
         self.mode_list_btn.setCheckable(True)
         self.mode_list_btn.setChecked(self.view_mode == "list")
         self.mode_list_btn.clicked.connect(lambda: self._set_view_mode("list"))
         toolbar.addWidget(self.mode_list_btn)
 
-        self.mode_grid_btn = QPushButton("⊞ Grid", self)
+        self.mode_grid_btn = QPushButton("Grid", self)
+        self.mode_grid_btn.setIcon(icon("grid", size=15))
+        self.mode_grid_btn.setIconSize(QSize(15, 15))
         self.mode_grid_btn.setCheckable(True)
         self.mode_grid_btn.setChecked(self.view_mode == "grid")
         self.mode_grid_btn.clicked.connect(lambda: self._set_view_mode("grid"))
@@ -473,15 +612,23 @@ class SeriesDetailView(QWidget):
         self.hero_poster.set_image(cover_path, title=title)
 
         is_fav = bool(self.series_data.get("is_favorite", 0))
-        self.fav_btn.setText("♥ Favorited" if is_fav else "♡ Favorite")
-        self.fav_btn.setStyleSheet("color: #E25555; font-weight: bold;" if is_fav else "")
+        self.fav_btn.setText("Favorited" if is_fav else "Favorite")
+        self.fav_btn.setIcon(icon("heart" if is_fav else "heart-outline", size=16, color="#FF5B6E" if is_fav else None))
+        self.fav_btn.setStyleSheet("color: #FF5B6E; font-weight: bold;" if is_fav else "")
 
         is_hidden = bool(self.series_data.get("is_hidden", 0))
         self.unhide_btn.setVisible(is_hidden)
 
+        # Streaming series have no local folder - repurpose the folder button.
+        is_local = (self.series_data.get("source_type") or "local").lower() == "local"
+        self.open_folder_btn.setText("Folder" if is_local else "Show Page")
+        self.open_folder_btn.setIcon(
+            icon("folder-open" if is_local else "external-link", size=15)
+        )
+
         desc = self.series_data.get("description", "")
         self.desc_lbl.setText(desc if desc else "No synopsis available. Click 'Online Info' to fetch metadata automatically.")
-        self.desc_lbl.setStyleSheet("color: #BFAFA1; font-size: 13px;" if desc else "color: #847569; font-style: italic;")
+        self.desc_lbl.setStyleSheet(f"color: {color('text_secondary')}; font-size: 13px;" if desc else f"color: {color('text_muted')}; font-style: italic;")
 
         # Populate Tags
         while self.tags_layout.count() > 1:
@@ -512,6 +659,26 @@ class SeriesDetailView(QWidget):
         self.db.set_setting("detail_view_mode", mode)
         self._render_episodes()
 
+    def refresh_icons(self) -> None:
+        """Re-render all vector icons after a theme change."""
+        self.back_btn.setIcon(icon("arrow-left", size=16))
+        self.play_next_btn.setIcon(icon("play", size=15, color="#0A0A0A"))
+        self.customize_btn.setIcon(icon("gear", size=15))
+        self.scrape_btn.setIcon(icon("globe", size=15))
+        self.open_folder_btn.setIcon(icon("folder-open", size=15))
+        self.unhide_btn.setIcon(icon("eye", size=15))
+        self.mode_list_btn.setIcon(icon("list", size=15))
+        self.mode_grid_btn.setIcon(icon("grid", size=15))
+        self._sync_favorite_icon()
+        if self.series_id is not None:
+            self.load_series(self.series_id)
+
+    def _sync_favorite_icon(self) -> None:
+        is_fav = bool(self.series_data.get("is_favorite", 0))
+        self.fav_btn.setIcon(
+            icon("heart" if is_fav else "heart-outline", size=16, color="#FF5B6E" if is_fav else None)
+        )
+
     def _render_episodes(self) -> None:
         # Clear existing layout
         old_layout = self.episodes_container.layout()
@@ -523,30 +690,176 @@ class SeriesDetailView(QWidget):
             QWidget().setLayout(old_layout)
 
         if not self.episodes:
+            is_local = (self.series_data.get("source_type") or "local").lower() == "local"
+            message = (
+                "No video files detected inside this series folder."
+                if is_local
+                else "No episodes were found for this streaming show."
+            )
             empty_layout = QVBoxLayout(self.episodes_container)
-            empty_lbl = QLabel("No video files detected inside this series folder.", self.episodes_container)
-            empty_lbl.setStyleSheet("color: #847569; font-size: 14px; padding: 40px;")
+            empty_lbl = QLabel(message, self.episodes_container)
+            empty_lbl.setStyleSheet(f"color: {color('text_muted')}; font-size: 14px; padding: 40px;")
             empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_layout.addWidget(empty_lbl)
             return
 
+        # --- Build ordered season groups (preserving DB sort order) ---
+        season_groups: Dict[str, List[Dict[str, Any]]] = {}
+        for ep in self.episodes:
+            season_groups.setdefault(self._season_label(ep), []).append(ep)
+
+        # Show season headers whenever there is more than one season, or when the
+        # show folder physically contains season sub-folders (even if only one).
+        single_season = (len(season_groups) == 1) and not bool(self.series_data.get("has_seasons"))
+
         if self.view_mode == "grid":
-            # Grid layout for episodes
-            layout = FlowLayout(self.episodes_container, margin=0, h_spacing=12, v_spacing=12)
-            for ep in self.episodes:
-                card = self._create_grid_episode_card(ep)
-                layout.addWidget(card)
+            self._render_grid_with_seasons(season_groups, single_season)
         else:
-            # Detailed List view
-            layout = QVBoxLayout(self.episodes_container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            for ep in self.episodes:
+            self._render_list_with_seasons(season_groups, single_season)
+
+    @staticmethod
+    def _season_label(ep: Dict[str, Any]) -> str:
+        """Return the display label for the season an episode belongs to."""
+        name = (ep.get("season_name") or "").strip()
+        if name:
+            return name
+        season_num = ep.get("season_number") or 0
+        return f"Season {season_num}" if season_num > 0 else "Season 1"
+
+    # ------------------------------------------------------------------
+    # List-mode renderer (with collapsible season headers)
+    # ------------------------------------------------------------------
+    def _render_list_with_seasons(
+        self,
+        season_groups: Dict[str, List[Dict[str, Any]]],
+        single_season: bool,
+    ) -> None:
+        layout = QVBoxLayout(self.episodes_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        for season_name, eps in season_groups.items():
+            watched_cnt = sum(1 for e in eps if e.get("watched"))
+
+            if not single_season:
+                is_collapsed = self._collapsed_seasons.get(season_name, False)
+                header = SeasonSectionHeader(
+                    season_name, len(eps), watched_cnt,
+                    is_collapsed=is_collapsed,
+                    parent=self.episodes_container,
+                )
+                header.mark_watched_signal.connect(self._on_mark_season_watched)
+                header.collapse_toggled.connect(self._on_season_collapsed)
+                layout.addWidget(header)
+
+            # Create episode rows; store them so we can show/hide on collapse
+            ep_widgets: List[QWidget] = []
+            for ep in eps:
                 row = EpisodeRowWidget(ep, self.db, self.episodes_container)
                 row.play_requested.connect(self._play_episode)
                 row.data_changed.connect(lambda: self.load_series(self.series_id))
                 layout.addWidget(row)
-            layout.addStretch()
+                ep_widgets.append(row)
+
+            # Apply initial collapse state
+            if not single_season and self._collapsed_seasons.get(season_name, False):
+                for w in ep_widgets:
+                    w.setVisible(False)
+
+        layout.addStretch()
+
+    # ------------------------------------------------------------------
+    # Grid-mode renderer (season labels between groups)
+    # ------------------------------------------------------------------
+    def _render_grid_with_seasons(
+        self,
+        season_groups: Dict[str, List[Dict[str, Any]]],
+        single_season: bool,
+    ) -> None:
+        outer = QVBoxLayout(self.episodes_container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(16)
+
+        for season_name, eps in season_groups.items():
+            watched_cnt = sum(1 for e in eps if e.get("watched"))
+
+            if not single_season:
+                is_collapsed = self._collapsed_seasons.get(season_name, False)
+                header = SeasonSectionHeader(
+                    season_name, len(eps), watched_cnt,
+                    is_collapsed=is_collapsed,
+                    parent=self.episodes_container,
+                )
+                header.mark_watched_signal.connect(self._on_mark_season_watched)
+                header.collapse_toggled.connect(self._on_season_collapsed)
+                outer.addWidget(header)
+
+            # Flow container for this season's cards
+            season_container = QWidget(self.episodes_container)
+            season_container.setObjectName("seasonGridContainer")
+            flow = FlowLayout(season_container, margin=0, h_spacing=12, v_spacing=12)
+            for ep in eps:
+                card = self._create_grid_episode_card(ep)
+                flow.addWidget(card)
+            outer.addWidget(season_container)
+
+            # Apply initial collapse state
+            if not single_season and self._collapsed_seasons.get(season_name, False):
+                season_container.setVisible(False)
+
+        outer.addStretch()
+
+    # ------------------------------------------------------------------
+    # Season header callbacks
+    # ------------------------------------------------------------------
+    def _on_mark_season_watched(self, season_name: str, watched: bool) -> None:
+        episode_ids = [
+            e["id"] for e in self.episodes
+            if self._season_label(e) == season_name
+        ]
+        self.db.mark_episodes_watched(episode_ids, watched)
+        self.load_series(self.series_id)
+        self.series_updated.emit(self.series_id)
+        msg = f"{'Marked' if watched else 'Unmarked'} all episodes in '{season_name}' as {'watched' if watched else 'unwatched'}."
+        ToastNotification.show_toast(self.window(), msg)
+
+    def _on_season_collapsed(self, season_name: str, is_collapsed: bool) -> None:
+        """Toggle visibility of episode rows for this season without a full re-render."""
+        self._collapsed_seasons[season_name] = is_collapsed
+        # Walk the episodes_container layout and hide/show widgets that belong to this season
+        layout = self.episodes_container.layout()
+        if layout is None:
+            return
+
+        # Identify all header widgets so we know episode rows = everything between headers
+        header_indices: Dict[int, str] = {}
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and isinstance(item.widget(), SeasonSectionHeader):
+                header_indices[i] = item.widget().season_name
+
+        sorted_header_positions = sorted(header_indices.keys())
+
+        # Find the range of rows that belong to season_name
+        target_start: Optional[int] = None
+        target_end: Optional[int] = None
+        for idx, pos in enumerate(sorted_header_positions):
+            if header_indices[pos] == season_name:
+                target_start = pos + 1
+                target_end = (
+                    sorted_header_positions[idx + 1]
+                    if idx + 1 < len(sorted_header_positions)
+                    else layout.count() - 1  # exclude the trailing stretch
+                )
+                break
+
+        if target_start is None:
+            return
+
+        for i in range(target_start, target_end):
+            item = layout.itemAt(i)
+            if item and item.widget():
+                item.widget().setVisible(not is_collapsed)
 
     def _create_grid_episode_card(self, ep: Dict[str, Any]) -> QWidget:
         """Create a compact card for grid view."""
@@ -567,9 +880,17 @@ class SeriesDetailView(QWidget):
         header.addStretch()
 
         if ep.get("watched"):
-            w_lbl = QLabel("✓ Watched", card)
-            w_lbl.setStyleSheet("color: #8A9A86; font-size: 10px; font-weight: bold;")
-            header.addWidget(w_lbl)
+            watched_box = QWidget(card)
+            wl = QHBoxLayout(watched_box)
+            wl.setContentsMargins(0, 0, 0, 0)
+            wl.setSpacing(4)
+            w_ic = QLabel(watched_box)
+            w_ic.setPixmap(pixmap("check", size=12, color="#8A9A86"))
+            wl.addWidget(w_ic)
+            w_tx = QLabel("Watched", watched_box)
+            w_tx.setStyleSheet("color: #8A9A86; font-size: 10px; font-weight: bold;")
+            wl.addWidget(w_tx)
+            header.addWidget(watched_box)
         header.addStretch()
         l.addLayout(header)
 
@@ -580,9 +901,11 @@ class SeriesDetailView(QWidget):
 
         l.addStretch()
 
-        play_btn = QPushButton("▶ Play", card)
+        play_btn = QPushButton("Play", card)
         play_btn.setObjectName("primaryBtn" if not ep.get("watched") else "secondaryBtn")
-        play_btn.setFixedHeight(26)
+        play_btn.setIcon(icon("play", size=13, color="#0A0A0A" if not ep.get("watched") else None))
+        play_btn.setIconSize(QSize(13, 13))
+        play_btn.setFixedHeight(28)
         play_btn.clicked.connect(lambda: self._play_episode(ep["id"], True))
         l.addWidget(play_btn)
 
@@ -635,6 +958,15 @@ class SeriesDetailView(QWidget):
         dialog.exec()
 
     def _open_series_folder(self) -> None:
+        if (self.series_data.get("source_type") or "local").lower() != "local":
+            # Streaming show - open its page in the browser instead.
+            page_url = self.series_data.get("source_url") or ""
+            if page_url:
+                import webbrowser
+
+                webbrowser.open(page_url)
+            return
+
         folder_path = self.series_data.get("folder_path")
         if not folder_path or not Path(folder_path).exists():
             return

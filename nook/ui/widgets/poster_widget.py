@@ -18,6 +18,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QWidget
 
+from nook.ui.icons import pixmap
+
 
 class PosterWidget(QWidget):
     """Draws a rounded cover poster image or an aesthetic cozy placeholder."""
@@ -38,10 +40,12 @@ class PosterWidget(QWidget):
         title: str = "",
         corner_radius: int = 12,
         fixed_size: Optional[QSize] = None,
-        parent: Optional[QWidget] = None
+        parent: Optional[QWidget] = None,
+        image_bytes: Optional[bytes] = None,
     ):
         super().__init__(parent)
         self.image_path = image_path
+        self.image_bytes = image_bytes
         self.title = title
         self.corner_radius = corner_radius
         self._cached_pixmap: Optional[QPixmap] = None
@@ -53,8 +57,14 @@ class PosterWidget(QWidget):
 
         self._load_pixmap()
 
-    def set_image(self, image_path: Optional[str], title: Optional[str] = None) -> None:
+    def set_image(
+        self,
+        image_path: Optional[str],
+        title: Optional[str] = None,
+        image_bytes: Optional[bytes] = None,
+    ) -> None:
         self.image_path = image_path
+        self.image_bytes = image_bytes
         if title is not None:
             self.title = title
         self._load_pixmap()
@@ -62,6 +72,13 @@ class PosterWidget(QWidget):
 
     def _load_pixmap(self) -> None:
         self._cached_pixmap = None
+        # In-memory bytes (e.g. a browse-result poster) take precedence and are
+        # never written to disk - they only live for as long as this widget.
+        if self.image_bytes:
+            pix = QPixmap()
+            if pix.loadFromData(bytes(self.image_bytes)) and not pix.isNull():
+                self._cached_pixmap = pix
+                return
         if self.image_path:
             p = Path(self.image_path)
             if p.exists() and p.is_file():
@@ -111,13 +128,13 @@ class PosterWidget(QWidget):
                 float(self.corner_radius - 1)
             )
 
-            # Draw film / video cozy icon symbol
-            painter.setPen(QColor(255, 255, 255, 120))
-            icon_font = QFont(self.font())
-            icon_font.setPointSize(28)
-            painter.setFont(icon_font)
-            center_rect = QRect(0, self.height() // 4, self.width(), 40)
-            painter.drawText(center_rect, Qt.AlignmentFlag.AlignCenter, "🎬")
+            # Draw film / video vector icon
+            film = pixmap("film", size=38, color="#FFFFFF")
+            painter.setOpacity(0.42)
+            fx = (self.width() - film.width() // film.devicePixelRatio()) // 2
+            fy = max(8, self.height() // 6)
+            painter.drawPixmap(int(fx), int(fy), film)
+            painter.setOpacity(1.0)
 
             # Draw Title text centered
             painter.setPen(QColor(255, 255, 255, 230))
