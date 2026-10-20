@@ -32,6 +32,8 @@ from nook.streaming import (
     ElisworldProvider,
     FlixbabaProvider,
     GenericStreamingProvider,
+    HanimeProvider,
+    HentaiHavenProvider,
     HiAnimeProvider,
     MManiProvider,
     MiruroProvider,
@@ -1236,6 +1238,99 @@ class TestStreamingProviders(unittest.TestCase):
 
         self.assertEqual([r.source_id for r in results], ["recent-1"])
         self.assertEqual(get.call_args[0][0], "https://example.com/")
+
+    def test_hanime_search_and_recent(self):
+        provider = HanimeProvider("https://hanime.tv", slug="hanime")
+        sample_catalog = [
+            {
+                "id": 1,
+                "name": "Overflow Season 1",
+                "slug": "overflow-season-1",
+                "search_titles": "Overflow Season 1",
+                "brand": "BrandA",
+                "cover_url": "https://cdn.example/overflow.jpg",
+                "created_at_unix": 100,
+                "created_at": "2020-01-01T00:00:00Z",
+                "views": 500000,
+            },
+            {
+                "id": 2,
+                "name": "Kotowari 1",
+                "slug": "kotowari-1",
+                "search_titles": "Kotowari 1 overflow",
+                "brand": "BrandB",
+                "cover_url": "https://cdn.example/kotowari.jpg",
+                "created_at_unix": 200,
+                "created_at": "2021-01-01T00:00:00Z",
+                "views": 100000,
+            },
+        ]
+        with mock.patch.object(provider, "_get_catalog", return_value=sample_catalog):
+            # Test search: "overflow" matches both, but "Overflow Season 1" scores higher
+            results = provider.search("overflow")
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0].source_id, "overflow-season-1")
+            self.assertEqual(results[0].title, "Overflow Season 1")
+            self.assertEqual(results[0].url, "https://hanime.tv/videos/hentai/overflow-season-1")
+
+            # Test recent: sorts by created_at_unix descending
+            recent = provider.fetch_recent(limit=10, page=1)
+            self.assertEqual(len(recent), 2)
+            self.assertEqual(recent[0].source_id, "kotowari-1")
+            self.assertEqual(recent[1].source_id, "overflow-season-1")
+
+            # Test episode
+            episodes = provider.fetch_episodes(results[0])
+            self.assertEqual(len(episodes), 1)
+            self.assertEqual(episodes[0].url, results[0].url)
+
+    def test_hentaihaven_search_and_episodes(self):
+        provider = HentaiHavenProvider("https://hentaihaven.xxx", slug="hentaihaven")
+        search_payload = [
+            {
+                "id": 101,
+                "slug": "kenki-virgo",
+                "title": {"rendered": "Kenki Virgo"},
+                "meta": {"vraven_remote_thumbnail": "images/kenki.jpg"},
+                "date": "2026-08-20T17:00:00",
+            }
+        ]
+        chapters_payload = [
+            {
+                "chapter_id": 1,
+                "chapter_name": "Episode 1",
+                "episode_slug": "episode-1",
+                "indexable_content_url": "https://master-lengs.org/kenki/1/master.m3u8",
+            },
+            {
+                "chapter_id": 2,
+                "chapter_name": "Episode 2",
+                "episode_slug": "episode-2",
+                "indexable_content_url": "",
+            },
+        ]
+
+        def fake_get_json(url, params=None, headers=None):
+            if "wp-manga" in url:
+                return search_payload
+            if "chapters" in url:
+                return chapters_payload
+            return []
+
+        with mock.patch.object(provider, "_get_json", side_effect=fake_get_json):
+            results = provider.search("kenki")
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].source_id, "kenki-virgo")
+            self.assertEqual(results[0].title, "Kenki Virgo")
+            self.assertEqual(results[0].url, "https://hentaihaven.xxx/watch/kenki-virgo/")
+            self.assertEqual(results[0].poster_url, "https://img.hentaihaven.xxx/images/kenki.jpg")
+
+            episodes = provider.fetch_episodes(results[0])
+            self.assertEqual(len(episodes), 2)
+            self.assertEqual(episodes[0].number, 1)
+            self.assertEqual(episodes[0].url, "https://master-lengs.org/kenki/1/master.m3u8")
+            self.assertEqual(episodes[1].number, 2)
+            self.assertEqual(episodes[1].url, "https://hentaihaven.xxx/watch/kenki-virgo/episode-2/")
 
 
 class TestFilenameCleaner(unittest.TestCase):

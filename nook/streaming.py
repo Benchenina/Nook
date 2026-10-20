@@ -202,6 +202,20 @@ KNOWN_SITES: Dict[str, Dict[str, Any]] = {
         "search_path": "/?s={query}",
         "item_patterns": ("/cartoons/", "/movies/"),
     },
+    "hanime": {
+        "name": "Hanime",
+        "item_patterns": ("/videos/hentai/",),
+    },
+    "hentaihaven": {
+        "name": "Hentai Haven",
+        "search_path": "/search/?q={query}",
+        "item_patterns": ("/watch/",),
+    },
+    "hentaiheaven": {
+        "name": "Hentai Haven",
+        "search_path": "/search/?q={query}",
+        "item_patterns": ("/watch/",),
+    },
 }
 
 
@@ -1505,9 +1519,13 @@ class MManiProvider(BaseStreamingProvider):
     ITEM_PATTERNS = ("/up/",)
     API_FALLBACK = "https://eng.animeapps.top/api/search3.php"
     SINGLE_API_FALLBACK = "https://eng.animeapps.top/api/single.php"
-    FILTER_API = "https://eng.animeapps.top/api/singlefilter.php"
+    FILTER_API = "https://mmani.com/ajax.php?filter"
     EPISODES_API = "https://epeng.animeapps.top/api2.php"
     SOURCE_API = "https://epeng.animeapps.top/apilink.php"
+
+    def __init__(self, base_url: str, slug: str = "mmani", name: str = "MMani"):
+        super().__init__(base_url, slug=slug, name=name)
+        self._kf_token: Optional[str] = None
 
     def _discover_endpoint(self, key: str, fallback: str) -> str:
         page = self._get_text(self.base_url + "/")
@@ -1521,14 +1539,27 @@ class MManiProvider(BaseStreamingProvider):
         return fallback
 
     def _discover_api(self) -> str:
-        return self._discover_endpoint("search", self.API_FALLBACK)
+        return self._discover_endpoint("search", f"{self.base_url}/ajax.php?search")
+
+    def _get_kf_token(self) -> str:
+        if self._kf_token:
+            return self._kf_token
+        page = self._get_text(self.base_url + "/")
+        match = re.search(r'\}\)\(window\.fetch,\s*["\']([^"\']+)["\']\)', page or "")
+        self._kf_token = match.group(1) if match else ""
+        return self._kf_token
 
     def _headers(self) -> Dict[str, str]:
-        return {
+        headers = {
             "Accept": "application/json, text/plain, */*",
             "Referer": self.base_url + "/",
             "Origin": self.base_url,
+            "X-Requested-With": "XMLHttpRequest",
         }
+        token = self._get_kf_token()
+        if token:
+            headers["X-KF-Req"] = token
+        return headers
 
     def _map_items(self, items: List[Dict[str, Any]],
                    limit: int = MAX_RESULTS) -> List[StreamResult]:
@@ -1590,6 +1621,17 @@ class MManiProvider(BaseStreamingProvider):
             if items:
                 return self._map_items(items)
 
+        # Fallback to older API fallback
+        for param in ("keyword", "q", "wd", "search"):
+            payload = self._get_json(
+                self.API_FALLBACK,
+                params={param: query, "page": 1, "limit": MAX_RESULTS},
+                headers=self._headers(),
+            )
+            items = _json_item_list(payload)
+            if items:
+                return self._map_items(items)
+
         # If the JSON API is unavailable, fall back to heuristic HTML parsing.
         return super().search(query)
 
@@ -1597,6 +1639,15 @@ class MManiProvider(BaseStreamingProvider):
                      page: int = 1) -> List[StreamResult]:
         if not self.base_url:
             return []
+        filter_api = self._discover_endpoint("filter", f"{self.base_url}/ajax.php?filter")
+        payload = self._get_json(
+            filter_api,
+            params={"page": max(1, int(page or 1)), "limit": limit},
+            headers=self._headers(),
+        )
+        items = _json_item_list(payload)
+        if items:
+            return self._map_items(items, limit=limit)
         payload = self._get_json(
             self.FILTER_API,
             params={"page": max(1, int(page or 1)), "limit": limit},
@@ -1611,9 +1662,14 @@ class MManiProvider(BaseStreamingProvider):
         """Turn MMani's opaque episode id into a direct HLS URL, if possible."""
         if not link:
             return ""
+        source_api = self._discover_endpoint("eplink", self.SOURCE_API)
         sources = self._get_json(
-            self.SOURCE_API, params={"data": link}, headers=self._headers()
+            source_api, params={"data": link}, headers=self._headers()
         )
+        if not isinstance(sources, list):
+            sources = self._get_json(
+                self.SOURCE_API, params={"data": link}, headers=self._headers()
+            )
         if not isinstance(sources, list):
             return ""
         for source in sources:
@@ -1642,20 +1698,31 @@ class MManiProvider(BaseStreamingProvider):
         if not result.source_id:
             return super().fetch_episodes(result)
 
-        single_api = self._discover_endpoint("single", self.SINGLE_API_FALLBACK)
+        single_api = self._discover_endpoint("single", f"{self.base_url}/ajax.php?single")
         details = self._get_json(
             single_api,
             params={"postid": result.source_id},
             headers=self._headers(),
         )
+        if not details:
+            details = self._get_json(
+                self.SINGLE_API_FALLBACK,
+                params={"postid": result.source_id},
+                headers=self._headers(),
+            )
         show = details.get("data") if isinstance(details, dict) else None
         anilist_id = str((show or {}).get("anilist") or "").strip()
         if not anilist_id:
             return super().fetch_episodes(result)
 
+        episodes_api = self._discover_endpoint("episodes", f"{self.base_url}/ajax.php?episodes")
         servers = self._get_json(
-            self.EPISODES_API, params={"epid": anilist_id}, headers=self._headers()
+            episodes_api, params={"epid": anilist_id}, headers=self._headers()
         )
+        if not isinstance(servers, list):
+            servers = self._get_json(
+                self.EPISODES_API, params={"epid": anilist_id}, headers=self._headers()
+            )
         if not isinstance(servers, list):
             return super().fetch_episodes(result)
 
@@ -1682,10 +1749,13 @@ class MManiProvider(BaseStreamingProvider):
             if number <= 0:
                 number = len(episodes) + 1
 
-            watch_url = (
-                f"{self.base_url}/up/{result.source_id}/watch/"
-                f"?server={server_id}&slug={slug}"
-            )
+            if server_id:
+                watch_url = (
+                    f"{self.base_url}/up/{result.source_id}/watch/"
+                    f"?server={server_id}&slug={slug}"
+                )
+            else:
+                watch_url = f"{self.base_url}/up/{result.source_id}/watch/?slug={slug}"
             url = watch_url
             if index < STREAM_RESOLVE_LIMIT:
                 direct = self._resolve_episode_link(str(entry.get("link") or ""))
@@ -1907,11 +1977,303 @@ class MiruroProvider(BaseStreamingProvider):
         return super().fetch_episodes(result)
 
 
+
+class HanimeProvider(BaseStreamingProvider):
+    """Hanime provider backed by the guest catalog API."""
+
+    CATALOG_API = "https://guest.freeanimehentai.net/api/v11/search_hvs"
+    _catalog_cache: Optional[List[Dict[str, Any]]] = None
+    _catalog_cache_time: float = 0.0
+    _CACHE_TTL: float = 600.0  # 10 minutes
+
+    @classmethod
+    def _get_catalog(cls, session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
+        now = time.time()
+        if cls._catalog_cache is not None and (now - cls._catalog_cache_time) < cls._CACHE_TTL:
+            return cls._catalog_cache
+        try:
+            client = session if session is not None else requests
+            headers = dict(DEFAULT_HEADERS)
+            headers["Accept"] = "application/json, text/plain, */*"
+            resp = client.get(cls.CATALOG_API, headers=headers, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data") if isinstance(data, dict) else data
+                if isinstance(items, list) and items:
+                    cls._catalog_cache = items
+                    cls._catalog_cache_time = now
+                    return items
+        except Exception:
+            pass
+        return cls._catalog_cache or []
+
+    def _item_to_result(self, item: Dict[str, Any]) -> Optional[StreamResult]:
+        slug = str(item.get("slug") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not slug or not name:
+            return None
+        poster = item.get("cover_url") or item.get("poster_url") or ""
+        created = str(item.get("created_at") or "")
+        year = created[:4] if len(created) >= 4 and created[:4].isdigit() else ""
+        desc = item.get("description") or ""
+        if desc:
+            desc = _TAG_RE.sub(" ", desc).strip()
+        base = self.base_url or "https://hanime.tv"
+        return StreamResult(
+            source_type=self.slug,
+            source_id=slug,
+            title=_unescape(name),
+            url=f"{base}/videos/hentai/{slug}",
+            poster_url=poster,
+            year=year,
+            description=desc,
+        )
+
+    def search(self, query: str) -> List[StreamResult]:
+        query = (query or "").strip()
+        if not query:
+            return []
+        catalog = self._get_catalog(self.session)
+        if not catalog:
+            return super().search(query)
+
+        tokens = [t.lower() for t in query.split() if t.strip()]
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        q_lower = query.lower()
+
+        for item in catalog:
+            name = (item.get("name") or "").lower()
+            slug = (item.get("slug") or "").lower()
+            search_titles = (item.get("search_titles") or "").lower()
+            brand = (item.get("brand") or "").lower()
+            tags = " ".join(item.get("tags") or []).lower() if isinstance(item.get("tags"), list) else ""
+            haystack = f"{name} {slug} {search_titles} {brand} {tags}"
+
+            if all(t in haystack for t in tokens):
+                score = 0.0
+                if q_lower == name:
+                    score += 50.0
+                elif name.startswith(q_lower):
+                    score += 30.0
+                elif q_lower in name:
+                    score += 15.0
+                if q_lower in slug:
+                    score += 10.0
+                views = item.get("views") or 0
+                if isinstance(views, (int, float)):
+                    score += min(views / 100000.0, 20.0)
+                scored.append((score, item))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        results: List[StreamResult] = []
+        for _, item in scored[:MAX_RESULTS]:
+            res = self._item_to_result(item)
+            if res:
+                results.append(res)
+        return results
+
+    def fetch_recent(self, limit: int = RECENT_PAGE_SIZE, page: int = 1) -> List[StreamResult]:
+        catalog = self._get_catalog(self.session)
+        if not catalog:
+            return super().fetch_recent(limit=limit, page=page)
+        by_date = sorted(
+            catalog,
+            key=lambda x: x.get("created_at_unix") or x.get("released_at_unix") or 0,
+            reverse=True,
+        )
+        offset = max(0, (page - 1) * limit)
+        page_items = by_date[offset : offset + limit]
+        results: List[StreamResult] = []
+        for item in page_items:
+            res = self._item_to_result(item)
+            if res:
+                results.append(res)
+        return results
+
+    def fetch_episodes(self, result: StreamResult) -> List[StreamEpisode]:
+        base = self.base_url or "https://hanime.tv"
+        return [
+            StreamEpisode(
+                title=result.title or "Watch",
+                url=result.url or f"{base}/videos/hentai/{result.source_id}",
+                number=1,
+            )
+        ]
+
+
+class HentaiHavenProvider(BaseStreamingProvider):
+    """HentaiHaven search provider backed by the CMS REST API."""
+
+    CMS_API = "https://cms.hentaihaven.xxx"
+    IMG_CDN = "https://img.hentaihaven.xxx/"
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+        }
+        if self.base_url:
+            headers["Referer"] = self.base_url + "/"
+            headers["Origin"] = self.base_url
+        return headers
+
+    def _item_to_result(self, item: Dict[str, Any]) -> Optional[StreamResult]:
+        slug = str(item.get("slug") or "").strip()
+        title_obj = item.get("title")
+        if isinstance(title_obj, dict):
+            title = title_obj.get("rendered") or ""
+        else:
+            title = str(title_obj or "")
+        title = title.strip()
+        if not slug or not title:
+            return None
+
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        poster = (
+            meta.get("vraven_remote_thumbnail")
+            or item.get("thumbnail_url")
+            or item.get("thumbnail")
+            or ""
+        )
+        if poster and not is_stream_url(poster):
+            poster = urljoin(self.IMG_CDN, poster.lstrip("/"))
+
+        date_str = str(item.get("date") or "")
+        year = date_str[:4] if len(date_str) >= 4 and date_str[:4].isdigit() else ""
+
+        desc_obj = item.get("content")
+        desc = ""
+        if isinstance(desc_obj, dict):
+            desc = desc_obj.get("rendered") or ""
+        elif isinstance(desc_obj, str):
+            desc = desc_obj
+        if desc:
+            desc = _TAG_RE.sub(" ", desc).strip()
+
+        base = self.base_url or "https://hentaihaven.xxx"
+        return StreamResult(
+            source_type=self.slug,
+            source_id=slug,
+            title=_unescape(title),
+            url=f"{base}/watch/{slug}/",
+            poster_url=poster,
+            year=year,
+            description=desc,
+        )
+
+    def search(self, query: str) -> List[StreamResult]:
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        url = f"{self.CMS_API}/wp-json/wp/v2/wp-manga"
+        payload = self._get_json(
+            url,
+            params={"search": query, "per_page": MAX_RESULTS},
+            headers=self._headers(),
+        )
+        if isinstance(payload, list) and payload:
+            results: List[StreamResult] = []
+            for item in payload:
+                if isinstance(item, dict):
+                    res = self._item_to_result(item)
+                    if res:
+                        results.append(res)
+            if results:
+                return results
+
+        return super().search(query)
+
+    def fetch_recent(self, limit: int = RECENT_PAGE_SIZE, page: int = 1) -> List[StreamResult]:
+        url = f"{self.CMS_API}/wp-json/wp/v2/wp-manga"
+        payload = self._get_json(
+            url,
+            params={
+                "per_page": limit,
+                "page": max(1, int(page or 1)),
+                "orderby": "date",
+                "order": "desc",
+            },
+            headers=self._headers(),
+        )
+        if isinstance(payload, list) and payload:
+            results: List[StreamResult] = []
+            for item in payload:
+                if isinstance(item, dict):
+                    res = self._item_to_result(item)
+                    if res:
+                        results.append(res)
+            if results:
+                return results
+
+        if page == 1:
+            trend = self._get_json(
+                f"{self.CMS_API}/wp-json/hhaven/v1/catalog/trending",
+                headers=self._headers(),
+            )
+            if isinstance(trend, dict) and isinstance(trend.get("items"), list):
+                results = []
+                for item in trend["items"]:
+                    if isinstance(item, dict):
+                        res = self._item_to_result(item)
+                        if res:
+                            results.append(res)
+                if results:
+                    return results[:limit]
+
+        return super().fetch_recent(limit=limit, page=page)
+
+    def fetch_episodes(self, result: StreamResult) -> List[StreamEpisode]:
+        if not result.source_id:
+            return super().fetch_episodes(result)
+
+        chapters_url = f"{self.CMS_API}/wp-json/hhaven/v1/manga/by-slug/{result.source_id}/chapters"
+        payload = self._get_json(chapters_url, headers=self._headers())
+        base = self.base_url or "https://hentaihaven.xxx"
+        if isinstance(payload, list) and payload:
+            episodes: List[StreamEpisode] = []
+            for index, chap in enumerate(payload):
+                if not isinstance(chap, dict):
+                    continue
+                name = str(chap.get("chapter_name") or chap.get("episode_slug") or "").strip()
+                ep_slug = str(chap.get("episode_slug") or chap.get("chapter_slug") or "").strip()
+                number = _extract_episode_number(name)
+                if number <= 0:
+                    number = index + 1
+                stream_url = str(chap.get("indexable_content_url") or "")
+                if not stream_url or not is_stream_url(stream_url):
+                    stream_url = (
+                        f"{base}/watch/{result.source_id}/{ep_slug}/"
+                        if ep_slug
+                        else f"{base}/watch/{result.source_id}/"
+                    )
+                episodes.append(
+                    StreamEpisode(
+                        title=name or f"Episode {number}",
+                        url=stream_url,
+                        number=number,
+                    )
+                )
+            if episodes:
+                episodes.sort(key=lambda ep: ep.number)
+                return episodes
+
+        return [
+            StreamEpisode(
+                title=result.title or "Watch",
+                url=result.url or f"{base}/watch/{result.source_id}/",
+                number=1,
+            )
+        ]
+
+
 _PROVIDER_BY_SLUG = {
     "1tube": OneTubeProvider,
     "animeidhentai": AnimeIDHentaiProvider,
     "elisworld": ElisworldProvider,
     "flixbaba": FlixbabaProvider,
+    "hanime": HanimeProvider,
+    "hentaihaven": HentaiHavenProvider,
+    "hentaiheaven": HentaiHavenProvider,
     "hianime": HiAnimeProvider,
     "mmani": MManiProvider,
     "miruro": MiruroProvider,
@@ -1925,7 +2287,15 @@ def provider_for_site(site: Dict[str, Any]) -> BaseStreamingProvider:
     base_url = site.get("base_url") or ""
     slug = (site.get("source_type") or site_slug(base_url)).lower()
     name = site.get("name") or ""
-    provider_cls = _PROVIDER_BY_SLUG.get(slug, GenericStreamingProvider)
+    provider_cls = _PROVIDER_BY_SLUG.get(slug)
+    if not provider_cls:
+        host = urlparse(base_url).netloc.lower() if "://" in base_url else base_url.lower()
+        for key, cls in _PROVIDER_BY_SLUG.items():
+            if key in slug or key in host or key in name.lower():
+                provider_cls = cls
+                break
+    if not provider_cls:
+        provider_cls = GenericStreamingProvider
     return provider_cls(base_url, slug=slug, name=name)
 
 
