@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 )
 
 from nook.database import Database, get_app_dir, get_covers_dir, get_db_path
+from nook.player import open_system_path
 from nook.scanner import LibraryScanner
 from nook.scraper import auto_match_new_series
 from nook.styles import (
@@ -791,13 +792,4 @@ class SettingsView(QWidget):
 
     def _open_appdata_folder(self) -> None:
         app_dir = get_app_dir()
-        system = platform.system()
-        try:
-            if system == "Windows":
-                os.startfile(app_dir)
-            elif system == "Darwin":
-                subprocess.Popen(["open", str(app_dir)])
-            else:
-                subprocess.Popen(["xdg-open", str(app_dir)])
-        except Exception:
-            pass
+        open_system_path(app_dir)

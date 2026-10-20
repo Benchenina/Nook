@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from nook.player import open_system_path, open_url
 from nook.styles import color, color_rgba
 from nook.streaming import site_display_name
 from nook.ui.icons import icon, pixmap
@@ -232,10 +233,8 @@ class SeriesCard(QFrame):
         else:
             page_url = self.series_data.get("source_url") or ""
             if page_url:
-                import webbrowser
-
                 open_action = menu.addAction(icon("external-link", size=16), "Open Show Page in Browser")
-                open_action.triggered.connect(lambda: webbrowser.open(page_url))
+                open_action.triggered.connect(lambda: open_url(page_url))
 
             menu.addSeparator()
             remove_action = menu.addAction(icon("trash", size=16), "Remove from Library")
@@ -248,17 +247,12 @@ class SeriesCard(QFrame):
         return (self.series_data.get("source_type") or "local").lower() == "local"
 
     def _open_folder_in_file_manager(self) -> None:
-        folder_path = self.series_data.get("folder_path")
-        if not self.is_local_source() or not folder_path or not Path(folder_path).exists():
+        if not self.is_local_source():
+            page_url = self.series_data.get("source_url") or ""
+            if page_url:
+                open_url(page_url)
             return
-
-        system = platform.system()
-        try:
-            if system == "Windows":
-                os.startfile(folder_path)
-            elif system == "Darwin":
-                subprocess.Popen(["open", folder_path])
-            else:
-                subprocess.Popen(["xdg-open", folder_path])
-        except Exception:
-            pass
+        folder_path = self.series_data.get("folder_path")
+        if not folder_path or not Path(folder_path).exists():
+            return
+        open_system_path(folder_path)

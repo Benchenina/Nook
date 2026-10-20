@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from nook.database import Database
+from nook.player import open_url
 from nook.scraper import OnlineMetadataScraper
 from nook.streaming import (
     StreamResult,
@@ -998,7 +999,5 @@ class BrowseView(QWidget):
         if not url:
             ToastNotification.show_toast(self.window(), "This result has no page to open.")
             return
-        import webbrowser
-
-        webbrowser.open(url)
+        open_url(url)
         ToastNotification.show_toast(self.window(), "Opening show page in your browser.")

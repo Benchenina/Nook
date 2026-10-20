@@ -1616,6 +1616,111 @@ class TestMediaPlayer(unittest.TestCase):
         self.assertIn("--start-time=30", command)
         self.assertIn("https://cdn/x/e1.m3u8", command)
 
+    def test_get_clean_env_restores_ld_path_and_strips_appimage(self):
+        from nook.player import get_clean_env
+        with mock.patch.dict(os.environ, {
+            "LD_LIBRARY_PATH": "/tmp/.mount_Nook/usr/lib",
+            "LD_LIBRARY_PATH_ORIG": "/usr/local/lib",
+            "APPIMAGE": "/path/to/Nook.AppImage",
+            "APPDIR": "/tmp/.mount_Nook",
+            "PYTHONHOME": "/tmp/.mount_Nook/usr",
+            "QT_PLUGIN_PATH": "/tmp/.mount_Nook/plugins",
+        }, clear=True):
+            clean = get_clean_env()
+            self.assertEqual(clean.get("LD_LIBRARY_PATH"), "/usr/local/lib")
+            self.assertNotIn("APPIMAGE", clean)
+            self.assertNotIn("APPDIR", clean)
+            self.assertNotIn("PYTHONHOME", clean)
+            self.assertNotIn("QT_PLUGIN_PATH", clean)
+
+    def test_get_clean_env_pops_empty_ld_path(self):
+        from nook.player import get_clean_env
+        with mock.patch.dict(os.environ, {
+            "LD_LIBRARY_PATH": "/tmp/.mount_Nook/usr/lib",
+            "LD_LIBRARY_PATH_ORIG": "",
+        }, clear=True):
+            clean = get_clean_env()
+            self.assertNotIn("LD_LIBRARY_PATH", clean)
+
+    def test_launch_system_player_passes_clean_env(self):
+        with mock.patch("platform.system", return_value="Linux"), \
+             mock.patch("nook.player.subprocess.Popen") as popen:
+            ok, err = self.player._launch_system_player("/media/video.mp4", "Linux")
+            self.assertTrue(ok)
+            self.assertIn("env", popen.call_args.kwargs)
+
+    def test_open_system_path_and_folder_pass_clean_env(self):
+        from nook.player import open_system_path, open_file_folder
+        with mock.patch("platform.system", return_value="Linux"), \
+             mock.patch("nook.player.subprocess.Popen") as popen:
+            open_system_path("/media/folder")
+            self.assertIn("env", popen.call_args.kwargs)
+            popen.reset_mock()
+            open_file_folder("/media/folder/file.mkv")
+            self.assertIn("env", popen.call_args.kwargs)
+
+    def test_open_url_linux_invokes_opener_with_clean_env(self):
+        from nook.player import open_url
+        with mock.patch("platform.system", return_value="Linux"), \
+             mock.patch("nook.player.shutil.which", return_value="/usr/bin/xdg-open"), \
+             mock.patch("nook.player.subprocess.Popen") as popen:
+            ok = open_url("https://hianime.to/watch/123")
+            self.assertTrue(ok)
+            self.assertEqual(popen.call_args[0][0], ["/usr/bin/xdg-open", "https://hianime.to/watch/123"])
+            self.assertIn("env", popen.call_args.kwargs)
+
+    def test_open_url_windows_invokes_registry_browser_command(self):
+        from nook.player import open_url
+        with mock.patch("platform.system", return_value="Windows"), \
+             mock.patch("nook.player._open_url_windows", return_value=True) as win_open:
+            ok = open_url("https://hianime.to/watch/123")
+            self.assertTrue(ok)
+            win_open.assert_called_once_with("https://hianime.to/watch/123")
+
+    def test_open_system_path_routes_urls_to_browser(self):
+        from nook.player import open_system_path
+        with mock.patch("nook.player.open_url", return_value=True) as mock_open:
+            ok = open_system_path("https://hianime.to/watch/123")
+            self.assertTrue(ok)
+            mock_open.assert_called_once_with("https://hianime.to/watch/123")
+
+        # Synthetic URI like hianime:// must not open in explorer
+        ok_synth = open_system_path("hianime://naruto-123")
+        self.assertFalse(ok_synth)
+
+    def test_play_episode_browser_show_opens_in_browser(self):
+        from nook.player import open_url
+        series_id = self.db.add_streaming_series(
+            "miruro",
+            "show1",
+            "Browser Show",
+            source_url="https://miruro.tv/info/show1",
+            episodes=[{"title": "Episode 1", "url": "https://miruro.tv/watch/show1?ep=1", "number": 1}],
+        )
+        episode = self.db.get_episodes_for_series(series_id)[0]
+
+        with mock.patch("nook.player.open_url", return_value=True) as mock_open:
+            ok, err = self.player.play_episode(episode["id"])
+            self.assertTrue(ok, err)
+            mock_open.assert_called_once_with("https://miruro.tv/watch/show1?ep=1")
+
+    def test_play_episode_browser_show_without_ep_url_falls_back_to_series_page(self):
+        from nook.player import open_url
+        series_id = self.db.add_streaming_series(
+            "miruro",
+            "show2",
+            "Browser Show 2",
+            source_url="https://miruro.tv/info/show2",
+            episodes=[],
+        )
+        # Manually create episode with empty file_path
+        ep_id = self.db.upsert_episode(series_id, "", "Ep 1", "Ep 1", 1, 1)
+
+        with mock.patch("nook.player.open_url", return_value=True) as mock_open:
+            ok, err = self.player.play_episode(ep_id)
+            self.assertTrue(ok, err)
+            mock_open.assert_called_once_with("https://miruro.tv/info/show2")
+
 
 class TestThemes(unittest.TestCase):
     def test_stylesheets_generate(self):

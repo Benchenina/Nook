@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from nook.database import Database
-from nook.player import MediaPlayer
+from nook.player import MediaPlayer, open_file_folder, open_system_path, open_url
 from nook.streaming import is_stream_url
 from nook.styles import color
 from nook.ui.customization_modal import CustomizationModal
@@ -361,26 +361,16 @@ class EpisodeRowWidget(QFrame):
 
     def _open_file_location(self) -> None:
         reference = (self.ep_data.get("file_path") or "").strip()
-        if is_stream_url(reference):
-            # Stream episodes live online - open the source in the browser.
-            import webbrowser
-
-            webbrowser.open(reference)
+        is_streaming = (getattr(self, "series_data", {}) or {}).get("source_type", "local").lower() != "local"
+        if is_stream_url(reference) or is_streaming:
+            target_url = reference if is_stream_url(reference) else (self.series_data.get("source_url") or "")
+            if target_url:
+                open_url(target_url)
             return
         file_path = Path(reference)
         if not file_path.exists():
             return
-        folder = file_path.parent
-        system = platform.system()
-        try:
-            if system == "Windows":
-                subprocess.Popen(f'explorer /select,"{file_path}"')
-            elif system == "Darwin":
-                subprocess.Popen(["open", "-R", str(file_path)])
-            else:
-                subprocess.Popen(["xdg-open", str(folder)])
-        except Exception:
-            pass
+        open_file_folder(file_path)
 
 
 class SeriesDetailView(QWidget):
@@ -923,6 +913,12 @@ class SeriesDetailView(QWidget):
     def _play_next_episode(self) -> None:
         """Find and play the first unwatched episode, or the first episode."""
         if not self.episodes:
+            if (self.series_data.get("source_type") or "local").lower() != "local":
+                page_url = self.series_data.get("source_url") or ""
+                if page_url:
+                    open_url(page_url)
+                    return
+            ToastNotification.show_toast(self.window(), "No episodes found for this series.")
             return
         # Find first unwatched
         target = next((e for e in self.episodes if not e.get("watched")), self.episodes[0])
@@ -961,22 +957,14 @@ class SeriesDetailView(QWidget):
         if (self.series_data.get("source_type") or "local").lower() != "local":
             # Streaming show - open its page in the browser instead.
             page_url = self.series_data.get("source_url") or ""
+            if not page_url and self.episodes:
+                page_url = (self.episodes[0].get("file_path") or "").strip()
             if page_url:
-                import webbrowser
-
-                webbrowser.open(page_url)
+                open_url(page_url)
             return
 
         folder_path = self.series_data.get("folder_path")
         if not folder_path or not Path(folder_path).exists():
             return
-        system = platform.system()
-        try:
-            if system == "Windows":
-                os.startfile(folder_path)
-            elif system == "Darwin":
-                subprocess.Popen(["open", folder_path])
-            else:
-                subprocess.Popen(["xdg-open", folder_path])
-        except Exception as e:
-            ToastNotification.show_toast(self.window(), f"Could not open folder: {str(e)}")
+        if not open_system_path(folder_path):
+            ToastNotification.show_toast(self.window(), "Could not open folder.")

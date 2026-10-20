@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from nook.database import Database
-from nook.player import MediaPlayer
+from nook.player import MediaPlayer, open_url
 from nook.ui.customization_modal import CustomizationModal
 from nook.styles import color
 from nook.ui.icons import icon, pixmap
@@ -336,6 +336,12 @@ class LibraryView(QWidget):
     def _play_next_series_episode(self, series_id: int) -> None:
         episodes = self.db.get_episodes_for_series(series_id)
         if not episodes:
+            series = self.db.get_series_by_id(series_id)
+            if series and (series.get("source_type") or "local").lower() != "local":
+                page_url = series.get("source_url") or ""
+                if page_url:
+                    open_url(page_url)
+                    return
             ToastNotification.show_toast(self.window(), "No episodes found for this series.")
             return
         target = next((e for e in episodes if not e.get("watched")), episodes[0])
